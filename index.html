@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智慧物流 - 智慧資料分類與配送可視化</title>
+
+    <!-- Leaflet 地圖樣式與腳本 -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- SheetJS (前端讀取與解析 Excel 檔案) -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; background: #f1f5f9; }
+        
+        /* 頂部導航列 */
+        header {
+            background-color: #1e293b;
+            color: #ffffff;
+            padding: 10px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+            z-index: 1000;
+        }
+        .header-title h2 { font-size: 18px; margin-bottom: 2px; }
+        .header-title span { font-size: 11px; color: #94a3b8; }
+        
+        .upload-container { display: flex; align-items: center; gap: 14px; }
+        .upload-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #cbd5e1; }
+        input[type="file"] {
+            background: #fff;
+            color: #333;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            border: 1px solid #cbd5e1;
+        }
+
+        /* 智慧分析看板列 */
+        #ml-dashboard {
+            background: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 8px 20px;
+            display: flex;
+            gap: 18px;
+            font-size: 13px;
+            align-items: center;
+            box-shadow: inset 0 -1px 2px rgba(0,0,0,0.03);
+            z-index: 999;
+            flex-wrap: wrap;
+        }
+        .meta-tag { display: flex; align-items: center; gap: 6px; }
+        .badge {
+            background: #e2e8f0;
+            color: #334155;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 12px;
+        }
+        .badge.success { background: #dcfce7; color: #166534; }
+        .badge.warning { background: #fef3c7; color: #92400e; }
+        .badge.info { background: #e0e7ff; color: #3730a3; }
+        .badge.depot { background: #fee2e2; color: #991b1b; }
+
+        /* 地圖區域 */
+        #map { flex: 1; width: 100%; }
+
+        /* 右側懸浮圖例 */
+        .legend-box {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 12px 14px;
+            font-size: 12px;
+            line-height: 18px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
+            border-radius: 8px;
+            max-height: 70vh;
+            overflow-y: auto;
+            min-width: 200px;
+            border: 1px solid #e2e8f0;
+        }
+        .legend-box h4 {
+            margin-bottom: 8px;
+            font-size: 13px;
+            border-bottom: 1px solid #cbd5e1;
+            padding-bottom: 4px;
+            color: #1e293b;
+        }
+        .legend-row { display: flex; align-items: center; margin-bottom: 6px; }
+        .color-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            border: 1px solid #475569;
+            flex-shrink: 0;
+        }
+        .depot-icon-badge {
+            display: inline-flex;
+            justify-content: center;
+            align-items: center;
+            width: 14px;
+            height: 14px;
+            font-size: 11px;
+            margin-right: 7px;
+        }
+
+        /* 出發點標記樣式 */
+        .depot-marker-pulse {
+            width: 22px;
+            height: 22px;
+            background: #dc2626;
+            border: 2.5px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.4), 0 3px 6px rgba(0,0,0,0.35);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-title">
+            <h2>智慧物流 - 配送與出發點位可視化</h2>
+            <span>支援出發點/倉儲辨識、目標配送點自動分類與空間可視化</span>
+        </div>
+        <div class="upload-container">
+            <!-- 1. 出發點上傳 (可選) -->
+            <div class="upload-item">
+                <label for="depot-file">🚩 出發點檔案：</label>
+                <input type="file" id="depot-file" accept=".xlsx, .xls" title="上傳包含出發倉儲/轉運點經緯度的 Excel" />
+            </div>
+            <!-- 2. 目標配送單號檔案 -->
+            <div class="upload-item">
+                <label for="excel-file">📦 配送目標單號：</label>
+                <input type="file" id="excel-file" accept=".xlsx, .xls" />
+            </div>
+        </div>
+    </header>
+
+    <!-- 智慧看板 -->
+    <div id="ml-dashboard">
+        <div class="meta-tag">
+            <span>出發點狀態：</span>
+            <span id="depot-badge" class="badge">未載入</span>
+        </div>
+        <div class="meta-tag">
+            <span>目標檔案類型：</span>
+            <span id="doc-type-badge" class="badge">尚未載入</span>
+        </div>
+        <div class="meta-tag">
+            <span>經緯度映射：</span>
+            <span id="coords-mapping-badge" class="badge">未識別</span>
+        </div>
+        <div class="meta-tag">
+            <span>分群特徵：</span>
+            <span id="group-field-badge" class="badge">未識別</span>
+        </div>
+        <div class="meta-tag" style="margin-left: auto;">
+            <span id="status-info" style="color: #64748b;">請選擇配送單號 Excel 或出發點 Excel</span>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        // 初始化地圖
+        const map = L.map('map').setView([24.2, 120.9], 8);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        // 分離圖層：出發點圖層 與 目標點位圖層
+        const depotLayer = L.featureGroup().addTo(map);
+        const markerLayer = L.featureGroup().addTo(map);
+        let legendControl = null;
+
+        // 全域快取資料
+        let currentTargetRows = [];
+        let currentTargetMapping = null;
+        let currentDepotRows = [];
+
+        const COLOR_PALETTE = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
+            "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#393b79", "#637939",
+            "#8ca252", "#b5cf6b", "#cedb9c", "#8c6d31", "#bd9e39", "#e7ba52",
+            "#843c39", "#ad494a", "#d6616b", "#e7969c", "#7b4173", "#a55194"
+        ];
+
+        // 綁定檔案上傳事件
+        document.getElementById('excel-file').addEventListener('change', (e) => handleFileUpload(e, 'TARGET'));
+        document.getElementById('depot-file').addEventListener('change', (e) => handleFileUpload(e, 'DEPOT'));
+
+        function handleFileUpload(e, mode) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            document.getElementById('status-info').innerText = `正在讀取 ${mode === 'DEPOT' ? '出發點' : '目標點'} 檔案...`;
+
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    const data = new Uint8Array(evt.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    
+                    let allRows = [];
+                    workbook.SheetNames.forEach(sheetName => {
+                        const sheet = workbook.Sheets[sheetName];
+                        const rows = XLSX.utils.sheet_to_json(sheet);
+                        rows.forEach(r => r['_sheet_name'] = sheetName);
+                        allRows = allRows.concat(rows);
+                    });
+
+                    if (allRows.length === 0) {
+                        alert("此試算表無有效資料！");
+                        return;
+                    }
+
+                    if (mode === 'DEPOT') {
+                        processDepotData(allRows);
+                    } else {
+                        processTargetData(allRows, workbook.SheetNames);
+                    }
+                } catch (err) {
+                    alert("檔案解析出錯：" + err.message);
+                    console.error(err);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // ==========================================
+        // 出發點（Depot）解析與繪製
+        // ==========================================
+        function processDepotData(rows) {
+            const columns = Object.keys(rows[0]).filter(k => k !== '_sheet_name');
+            const mapping = classifyColumns(rows, columns);
+
+            if (!mapping.lat || !mapping.lon) {
+                alert("無法在出發點檔案中找到有效經緯度欄位！");
+                return;
+            }
+
+            // 尋找名稱與代碼欄位
+            const nameCol = columns.find(c => ['起點名稱', '出發點', '站點名稱', '倉庫名稱', '倉庫', '站點', '名稱'].includes(c)) || columns[0];
+            const codeCol = columns.find(c => ['起點編號', '出發站代碼', '倉庫代碼', '站點代號', '代碼'].includes(c));
+
+            currentDepotRows = rows.map(r => ({
+                lat: parseFloat(r[mapping.lat]),
+                lon: parseFloat(r[mapping.lon]),
+                name: r[nameCol] || '預設出發倉庫',
+                code: codeCol ? r[codeCol] : null,
+                address: r[mapping.address] || '無地址資料',
+                raw: r
+            })).filter(d => !isNaN(d.lat) && !isNaN(d.lon) && d.lat !== 0 && d.lon !== 0);
+
+            renderDepotsOnMap();
+            updateAllVisuals();
+        }
+
+        function renderDepotsOnMap() {
+            depotLayer.clearLayers();
+
+            currentDepotRows.forEach((depot, idx) => {
+                // 自訂帶紅色波紋的標記 Icon
+                const customIcon = L.divIcon({
+                    className: 'depot-div-icon',
+                    html: `<div class="depot-marker-pulse" title="出發點">🚩</div>`,
+                    iconSize: [22, 22],
+                    iconAnchor: [11, 11]
+                });
+
+                const popupHtml = `
+                    <div style="font-size: 13px; line-height: 1.6;">
+                        <b style="color: #dc2626; font-size: 14px;">🚩 【出發站點 / 倉庫】</b><br>
+                        <b>名稱:</b> ${depot.name}<br>
+                        ${depot.code ? `<b>代碼:</b> ${depot.code}<br>` : ''}
+                        <b>地址:</b> ${depot.address}<br>
+                        <b>經緯度:</b> ${depot.lat.toFixed(5)}, ${depot.lon.toFixed(5)}
+                    </div>
+                `;
+
+                L.marker([depot.lat, depot.lon], { icon: customIcon })
+                    .bindPopup(popupHtml)
+                    .addTo(depotLayer);
+            });
+
+            const depotBadge = document.getElementById('depot-badge');
+            if (currentDepotRows.length > 0) {
+                depotBadge.innerText = `已標記 ${currentDepotRows.length} 個出發點`;
+                depotBadge.className = 'badge depot';
+            }
+        }
+
+        // ==========================================
+        // 目標配送點（Target）解析
+        // ==========================================
+        function processTargetData(rows, sheetNames) {
+            const columns = Object.keys(rows[0]).filter(k => k !== '_sheet_name');
+
+            // 檔案與欄位識別
+            const docType = classifyDocumentType(columns, sheetNames, rows.length);
+            updateDocTypeBadge(docType);
+
+            const mapping = classifyColumns(rows, columns);
+            updateMappingBadges(mapping);
+
+            if (!mapping.lat || !mapping.lon) {
+                document.getElementById('status-info').innerText = "缺少地理座標，無法呈現地圖！";
+                alert("未能識別出目標單號的經緯度座標欄位！");
+                return;
+            }
+
+            // 額外機制：檢查目標單號表內是否已經混有出發點（如 順序 == 0 或 類型包含「起點」）
+            checkAndExtractInlineDepots(rows, mapping);
+
+            currentTargetRows = rows;
+            currentTargetMapping = mapping;
+
+            renderTargetsOnMap();
+            updateAllVisuals();
+        }
+
+        function checkAndExtractInlineDepots(rows, mapping) {
+            // 若使用者未額外上傳起點檔，但目標表內有 sequence 0 或 倉庫關鍵字，自動抽取出發點
+            if (currentDepotRows.length > 0) return;
+
+            const seqCol = Object.keys(rows[0]).find(c => ['順序', '配送順序', '站序'].includes(c));
+            const typeCol = Object.keys(rows[0]).find(c => ['類型', '站點類型', '型態'].includes(c));
+
+            const detectedDepots = [];
+            rows.forEach(r => {
+                const isSeqZero = seqCol && String(r[seqCol]).trim() === '0';
+                const isTypeDepot = typeCol && /起點|出發|倉庫|轉運|depot/i.test(String(r[typeCol]));
+
+                if (isSeqZero || isTypeDepot) {
+                    const lat = parseFloat(r[mapping.lat]);
+                    const lon = parseFloat(r[mapping.lon]);
+                    if (!isNaN(lat) && !isNaN(lon) && lat !== 0) {
+                        detectedDepots.push({
+                            lat, lon,
+                            name: r['客戶名稱'] || r['站點名稱'] || '內嵌辨識出發點',
+                            address: r[mapping.address] || '表內起點',
+                            code: r[mapping.group] || '0'
+                        });
+                    }
+                }
+            });
+
+            if (detectedDepots.length > 0) {
+                currentDepotRows = detectedDepots;
+                renderDepotsOnMap();
+            }
+        }
+
+        function renderTargetsOnMap() {
+            markerLayer.clearLayers();
+
+            const groupColorMap = {};
+            const groupCounts = {};
+            let colorIdx = 0;
+            let validCount = 0;
+
+            currentTargetRows.forEach(row => {
+                const lat = parseFloat(row[currentTargetMapping.lat]);
+                const lon = parseFloat(row[currentTargetMapping.lon]);
+                const groupVal = String(row[currentTargetMapping.group] || '未分類');
+
+                if (isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) return;
+
+                // 若該點已作為出發點顯示，則目標層可略過或並存（此處略過純順序 0 的起點）
+                if (row['順序'] === 0 || row['順序'] === '0') return;
+
+                validCount++;
+
+                if (!groupColorMap[groupVal]) {
+                    groupColorMap[groupVal] = COLOR_PALETTE[colorIdx % COLOR_PALETTE.length];
+                    colorIdx++;
+                    groupCounts[groupVal] = 0;
+                }
+                groupCounts[groupVal]++;
+
+                let extraDetail = '';
+                if (row['車號']) extraDetail += `<b>車號:</b> ${row['車號']}<br>`;
+                if (row['順序']) extraDetail += `<b>配送順序:</b> 第 ${row['順序']} 站<br>`;
+                if (row['班次'] || row['早、晚班車次']) extraDetail += `<b>班次:</b> ${row['班次'] || row['早、晚班車次']}<br>`;
+
+                const popupContent = `
+                    <div style="font-size: 13px; line-height: 1.6;">
+                        <b style="color: #0284c7;">【${currentTargetMapping.group}】:</b> ${groupVal}<br>
+                        <b>地址:</b> ${row[currentTargetMapping.address] || '無'}<br>
+                        ${extraDetail}
+                        <b>經緯度:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
+                    </div>
+                `;
+
+                const marker = L.circleMarker([lat, lon], {
+                    radius: 6,
+                    fillColor: groupColorMap[groupVal],
+                    color: "#0f172a",
+                    weight: 1,
+                    opacity: 1,
+                    fillOpacity: 0.85
+                }).bindPopup(popupContent);
+
+                markerLayer.addLayer(marker);
+            });
+
+            document.getElementById('status-info').innerText = 
+                `載入完成：${validCount} 筆配送點位，${currentDepotRows.length} 個出發點`;
+
+            updateLegend(groupColorMap, groupCounts, currentTargetMapping.group);
+        }
+
+        function updateAllVisuals() {
+            // 合併所有點位進行自適應縮放
+            const allLayers = [];
+            if (markerLayer.getLayers().length > 0) allLayers.push(markerLayer);
+            if (depotLayer.getLayers().length > 0) allLayers.push(depotLayer);
+
+            if (allLayers.length > 0) {
+                const combinedGroup = L.featureGroup(allLayers);
+                map.fitBounds(combinedGroup.getBounds().pad(0.08));
+            }
+        }
+
+        // ==========================================
+        // 輔助分類判斷
+        // ==========================================
+        function classifyDocumentType(cols, sheetNames, rowCount) {
+            const hasCarmFields = ['結案材積', '客單編號', '出貨單號', '早、晚班車次'].some(k => cols.includes(k));
+            const hasVrpFields = ['正規化地址', 'x座標', 'y座標', '順序', '排序序號'].some(k => cols.includes(k));
+            const hasCoordFields = cols.includes('Latitude') && cols.includes('Longitude') && cols.includes('座標狀態');
+
+            if (hasCoordFields) return { type: 'COORD_MATCH', label: '地理座標對照檔', class: 'success' };
+            if (hasVrpFields) return { type: 'VRP_SCHEDULE', label: 'VRP 排程最佳化檔', class: 'info' };
+            if (hasCarmFields) return { type: 'CARM3100_RAW', label: 'ERP 原始貨況檔', class: 'warning' };
+            return { type: 'GENERIC', label: '自訂配送單號資料', class: 'info' };
+        }
+
+        function classifyColumns(rows, columns) {
+            let latCol = null, lonCol = null;
+            let groupCol = null, addressCol = null;
+
+            columns.forEach(col => {
+                const lower = col.toLowerCase();
+                const sampleVals = rows.slice(0, 30).map(r => parseFloat(r[col])).filter(v => !isNaN(v) && v !== 0);
+                if (sampleVals.length === 0) return;
+
+                const avg = sampleVals.reduce((a, b) => a + b, 0) / sampleVals.length;
+                if ((lower.includes('lon') || lower.includes('lng') || lower.includes('x') || lower.includes('經度')) && avg > 118 && avg < 123) {
+                    lonCol = col;
+                } else if ((lower.includes('lat') || lower.includes('y') || lower.includes('緯度')) && avg > 21 && avg < 26) {
+                    latCol = col;
+                }
+            });
+
+            const groupCandidates = ['組別', '派車單號', '單號', '訂單編號', '車次說明'];
+            for (let cand of groupCandidates) {
+                if (columns.includes(cand)) { groupCol = cand; break; }
+            }
+
+            const addrCandidates = ['正規化地址', '提貨人地址', '地址', '客戶地址', '起點地址'];
+            for (let cand of addrCandidates) {
+                if (columns.includes(cand)) { addressCol = cand; break; }
+            }
+
+            return { lat: latCol, lon: lonCol, group: groupCol || '派車單號', address: addressCol || '地址' };
+        }
+
+        function updateDocTypeBadge(docType) {
+            const b = document.getElementById('doc-type-badge');
+            b.innerText = docType.label;
+            b.className = 'badge ' + docType.class;
+        }
+
+        function updateMappingBadges(mapping) {
+            const coordBadge = document.getElementById('coords-mapping-badge');
+            if (mapping.lat && mapping.lon) {
+                coordBadge.innerText = `X:${mapping.lon} / Y:${mapping.lat}`;
+                coordBadge.className = 'badge success';
+            }
+            const groupBadge = document.getElementById('group-field-badge');
+            groupBadge.innerText = mapping.group;
+            groupBadge.className = 'badge info';
+        }
+
+        function updateLegend(colorMap, countMap, groupTitle) {
+            if (legendControl) map.removeControl(legendControl);
+
+            legendControl = L.control({ position: 'topright' });
+            legendControl.onAdd = function() {
+                const div = L.DomUtil.create('div', 'legend-box');
+                div.innerHTML = `<h4>圖例分類</h4>`;
+
+                // 出發點置頂標記
+                if (currentDepotRows.length > 0) {
+                    div.innerHTML += `
+                        <div class="legend-row" style="font-weight: 600; color: #dc2626;">
+                            <span class="depot-icon-badge">🚩</span>
+                            <span>出發點/倉儲 (${currentDepotRows.length})</span>
+                        </div>
+                        <div style="border-bottom: 1px dashed #cbd5e1; margin: 4px 0 8px 0;"></div>
+                    `;
+                }
+
+                div.innerHTML += `<div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">配送分群 (${groupTitle})</div>`;
+                for (const [grp, col] of Object.entries(colorMap)) {
+                    div.innerHTML += `
+                        <div class="legend-row">
+                            <div class="color-dot" style="background:${col};"></div>
+                            <span>${grp} (${countMap[grp]})</span>
+                        </div>
+                    `;
+                }
+                return div;
+            };
+            legendControl.addTo(map);
+        }
+    </script>
+</body>
+</html>
