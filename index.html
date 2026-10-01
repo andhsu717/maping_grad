@@ -3,627 +3,763 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智慧物流 - 智慧資料分類與配送可視化</title>
+    <title>智慧物流 - 車次分組與互動排程系統 (多日版)</title>
 
-    <!-- Leaflet 地圖樣式與腳本 -->
+    <!-- Leaflet CSS & JS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-    <!-- SheetJS (前端讀取與解析 Excel 檔案) -->
+    <!-- SheetJS -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; background: #f1f5f9; }
-        
-        /* 頂部導航列 */
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; background: #f8fafc; color: #1e293b; }
+
         header {
-            background-color: #1e293b;
+            background-color: #0f172a;
             color: #ffffff;
             padding: 10px 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
             z-index: 1000;
         }
-        .header-title h2 { font-size: 18px; margin-bottom: 2px; }
+        .header-title h2 { font-size: 17px; font-weight: 700; }
         .header-title span { font-size: 11px; color: #94a3b8; }
-        
-        .upload-container { display: flex; align-items: center; gap: 12px; }
-        .upload-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #cbd5e1; }
-        input[type="file"] {
-            background: #fff;
-            color: #333;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            cursor: pointer;
-            border: 1px solid #cbd5e1;
-        }
-        .btn-optimize {
-            background: #0284c7;
-            color: #ffffff;
-            border: none;
-            padding: 6px 14px;
-            border-radius: 4px;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        .btn-optimize:hover { background: #0369a1; }
+        .upload-bar { display: flex; align-items: center; gap: 12px; }
+        .upload-bar label { font-size: 12px; color: #cbd5e1; font-weight: 500; }
+        input[type="file"] { background: #1e293b; color: #f8fafc; padding: 4px 8px; border-radius: 4px; font-size: 12px; border: 1px solid #334155; cursor: pointer; }
 
-        /* 智慧分析看板列 */
-        #ml-dashboard {
+        .main-layout { display: flex; flex: 1; height: calc(100vh - 54px); overflow: hidden; }
+
+        #sidebar {
+            width: 360px;
             background: #ffffff;
-            border-bottom: 1px solid #e2e8f0;
-            padding: 8px 20px;
+            border-right: 1px solid #e2e8f0;
             display: flex;
-            gap: 16px;
-            font-size: 13px;
-            align-items: center;
-            box-shadow: inset 0 -1px 2px rgba(0,0,0,0.03);
+            flex-direction: column;
+            box-shadow: 2px 0 8px rgba(0,0,0,0.04);
             z-index: 999;
-            flex-wrap: wrap;
+            position: relative; 
         }
-        .meta-tag { display: flex; align-items: center; gap: 6px; }
-        .badge {
-            background: #e2e8f0;
-            color: #334155;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-weight: 600;
-            font-size: 12px;
+        .sidebar-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid #e2e8f0;
+            background: #f8fafc;
         }
-        .badge.success { background: #dcfce7; color: #166534; }
-        .badge.warning { background: #fef3c7; color: #92400e; }
-        .badge.info { background: #e0e7ff; color: #3730a3; }
-        .badge.depot { background: #fee2e2; color: #991b1b; }
+        .sidebar-header h3 { font-size: 14px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+        .batch-actions { display: flex; gap: 8px; align-items: center; }
+        .btn-mini { background: #e2e8f0; border: none; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; color: #334155; }
+        .btn-mini:hover { background: #cbd5e1; }
 
-        /* 地圖區域 */
-        #map { flex: 1; width: 100%; }
-
-        /* 右側懸浮圖例 */
-        .legend-box {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 12px 14px;
-            font-size: 12px;
-            line-height: 18px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.15);
-            border-radius: 8px;
-            max-height: 70vh;
-            overflow-y: auto;
-            min-width: 200px;
-            border: 1px solid #e2e8f0;
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
         }
-        .legend-box h4 {
-            margin-bottom: 8px;
+
+        .btn-run {
+            background: #0284c7;
+            color: #fff;
+            border: none;
+            flex: 2;
+            padding: 8px 12px;
+            border-radius: 6px;
             font-size: 13px;
-            border-bottom: 1px solid #cbd5e1;
-            padding-bottom: 4px;
-            color: #1e293b;
-        }
-        .legend-row { display: flex; align-items: center; margin-bottom: 5px; }
-        .color-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 8px;
-            border: 1px solid #475569;
-            flex-shrink: 0;
-        }
-        .depot-marker-pulse {
-            width: 22px;
-            height: 22px;
-            background: #dc2626;
-            border: 2.5px solid #ffffff;
-            border-radius: 50%;
-            box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.4), 0 3px 6px rgba(0,0,0,0.35);
+            font-weight: 600;
+            cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: white;
+            gap: 6px;
+            transition: background 0.2s;
+        }
+        .btn-run:hover { background: #0369a1; }
+        .btn-run:disabled { background: #94a3b8; cursor: not-allowed; }
+
+        /* 【新增】清除按鈕樣式 */
+        .btn-clear {
+            background: #f1f5f9;
+            color: #475569;
+            border: 1px solid #cbd5e1;
+            flex: 1;
+            padding: 8px 12px;
+            border-radius: 6px;
             font-size: 12px;
-            font-weight: bold;
-        }
-        .stop-seq-label {
-            background: rgba(15, 23, 42, 0.85);
-            color: #ffffff;
-            border-radius: 10px;
-            padding: 1px 6px;
-            font-size: 11px;
             font-weight: 600;
-            border: 1px solid #ffffff;
-            white-space: nowrap;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
         }
+        .btn-clear:hover { background: #e2e8f0; color: #0f172a; border-color: #94a3b8; }
+        .btn-clear:disabled { background: #f8fafc; color: #cbd5e1; border-color: #e2e8f0; cursor: not-allowed; }
+
+        .progress-bar-container {
+            width: 100%;
+            background: #e2e8f0;
+            height: 6px;
+            border-radius: 3px;
+            margin-top: 8px;
+            overflow: hidden;
+            display: none;
+        }
+        .progress-bar-inner { height: 100%; width: 0%; background: #0284c7; transition: width 0.2s; }
+
+        #trip-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            scroll-behavior: smooth;
+        }
+
+        .scroll-to-top-btn {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 38px;
+            height: 38px;
+            background: #0284c7;
+            color: #ffffff;
+            border: none;
+            border-radius: 50%;
+            font-size: 16px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s, transform 0.2s, background 0.2s;
+            z-index: 1000;
+        }
+        .scroll-to-top-btn.visible { opacity: 1; visibility: visible; }
+        .scroll-to-top-btn:hover { background: #0369a1; transform: translateY(-2px); }
+
+        .date-group { 
+            border: 1px solid #cbd5e1; 
+            border-radius: 8px; 
+            background: #ffffff; 
+            overflow: hidden; 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05); 
+            flex-shrink: 0; 
+        }
+        .date-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: #f1f5f9; cursor: pointer; user-select: none; border-bottom: 1px solid #e2e8f0; }
+        .date-header:hover { background: #e2e8f0; }
+        .date-title-group { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #0f172a; }
+        .date-content { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; background: #ffffff; }
+        
+        .date-content.hidden { display: none !important; }
+        
+        .toggle-icon { font-size: 10px; transition: transform 0.2s; color: #64748b; }
+        .toggle-icon.collapsed { transform: rotate(-90deg); }
+
+        .trip-card { border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; background: #f8fafc; transition: box-shadow 0.2s, border-color 0.2s; }
+        .trip-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+        .trip-title-group { display: flex; align-items: center; gap: 8px; }
+        .trip-color-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+        .trip-id { font-size: 13px; font-weight: 700; color: #0f172a; }
+        .badge-count { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: #e0f2fe; color: #0369a1; font-weight: 600; }
+        .trip-stats { display: flex; gap: 10px; font-size: 11px; color: #64748b; margin-bottom: 6px; background: #ffffff; border: 1px solid #e2e8f0; padding: 4px 6px; border-radius: 4px; }
+        .depot-select-row { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #475569; }
+        .depot-select-row select { font-size: 11px; padding: 2px 4px; border-radius: 4px; border: 1px solid #cbd5e1; max-width: 170px; }
+
+        #map { flex: 1; height: 100%; position: relative; }
+        .stop-popup { font-size: 12px; line-height: 1.6; min-width: 230px; }
+        .stop-popup-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
+        .prop-item { margin: 2px 0; color: #334155; }
+        .action-row { margin-top: 8px; padding-top: 6px; border-top: 1px dashed #cbd5e1; display: flex; flex-direction: column; gap: 5px; }
+        .btn-popup-cancel { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 4px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .btn-popup-restore { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 4px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .transfer-group { display: flex; gap: 4px; }
+        .transfer-group select { flex: 1; font-size: 11px; }
+        .transfer-group button { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
+        .stop-seq-label { color: #ffffff; border-radius: 10px; padding: 1px 6px; font-size: 11px; font-weight: 600; border: 1px solid #ffffff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); white-space: nowrap; }
     </style>
 </head>
 <body>
 
     <header>
         <div class="header-title">
-            <h2>智慧物流 - 配送與出發點位可視化</h2>
-            <span>支援出發點/倉儲辨識、目標配送點分類與開放式路徑最佳化</span>
+            <h2>智慧物流動態排程與調度系統</h2>
+            <span>多日行程佇列運算、欄位智能分類與局部熱更新</span>
         </div>
-        <div class="upload-container">
-            <div class="upload-item">
-                <label for="depot-file">🚩 出發點：</label>
-                <input type="file" id="depot-file" accept=".xlsx, .xls" title="上傳出發點/倉儲 Excel" />
+        <div class="upload-bar">
+            <div>
+                <label>🚩 出發點：</label>
+                <input type="file" id="depot-file" accept=".xlsx, .xls" />
             </div>
-            <div class="upload-item">
-                <label for="excel-file">📦 配送目標：</label>
+            <div>
+                <label>📦 配送單號：</label>
                 <input type="file" id="excel-file" accept=".xlsx, .xls" />
             </div>
-            <button class="btn-optimize" onclick="requestRouteOptimization()">🚀 開始最佳化路徑</button>
         </div>
     </header>
 
-    <!-- 看板狀態列 -->
-    <div id="ml-dashboard">
-        <div class="meta-tag">
-            <span>出發點：</span>
-            <span id="depot-badge" class="badge">未載入</span>
+    <div class="main-layout">
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <h3>
+                    <span>行程車次管理</span>
+                    <div class="batch-actions">
+                        <button class="btn-mini" onclick="toggleSelectAll(true)">全選</button>
+                        <button class="btn-mini" onclick="toggleSelectAll(false)">全不選</button>
+                    </div>
+                </h3>
+                <span id="summary-meta" style="font-size: 11px; color: #64748b;">請上傳檔案載入資料...</span>
+                
+                <div class="action-buttons">
+                    <button id="btn-execute" class="btn-run" onclick="runQueueOptimization()" disabled>🚀 執行計算並輸出</button>
+                    <!-- 【新增】清除按鈕 -->
+                    <button id="btn-clear" class="btn-clear" onclick="clearAllRoutes()" disabled>🧹 清除路線</button>
+                </div>
+                
+                <div id="progress-bar-wrap" class="progress-bar-container">
+                    <div id="progress-bar" class="progress-bar-inner"></div>
+                </div>
+            </div>
+            
+            <div id="trip-list">
+                <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">尚未載入單號資料</div>
+            </div>
+
+            <button id="scrollTopBtn" class="scroll-to-top-btn" onclick="scrollToTop()" title="回到最頂部">⬆️</button>
         </div>
-        <div class="meta-tag">
-            <span>目標類型：</span>
-            <span id="doc-type-badge" class="badge">尚未載入</span>
-        </div>
-        <div class="meta-tag">
-            <span>經緯度映射：</span>
-            <span id="coords-mapping-badge" class="badge">未識別</span>
-        </div>
-        <div class="meta-tag">
-            <span>分群欄位：</span>
-            <span id="group-field-badge" class="badge">未識別</span>
-        </div>
-        <div class="meta-tag" style="margin-left: auto;">
-            <span id="status-info" style="color: #64748b;">請選擇出發點與目標點 Excel 檔案</span>
-        </div>
+        <div id="map"></div>
     </div>
 
-    <div id="map"></div>
-
     <script>
-        // 初始化 Leaflet 地圖
+        const COLOR_PALETTE = [
+            "#0284c7", "#ea580c", "#16a34a", "#dc2626", "#7c3aed",
+            "#0d9488", "#d97706", "#db2777", "#4f46e5", "#ca8a04",
+            "#059669", "#65a30d", "#2563eb", "#9333ea", "#c026d3"
+        ];
+
+        let depotStore = []; 
+        let tripStore = {};  
+        const expandedDates = new Set(); 
+        const tripLayerGroups = {}; 
+        const depotLayer = L.featureGroup();
+
         const map = L.map('map').setView([24.2, 120.9], 8);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '&copy; OpenStreetMap contributors'
         }).addTo(map);
+        depotLayer.addTo(map);
 
-        // 圖層管理
-        const depotLayer = L.featureGroup().addTo(map);
-        const markerLayer = L.featureGroup().addTo(map);
-        const polylineLayer = L.featureGroup().addTo(map);
-        let legendControl = null;
+        const tripListEl = document.getElementById('trip-list');
+        const scrollTopBtn = document.getElementById('scrollTopBtn');
 
-        // 全域變數
-        let currentTargetRows = [];
-        let currentTargetMapping = null;
-        let currentDepotRows = [];
+        tripListEl.addEventListener('scroll', () => {
+            if (tripListEl.scrollTop > 150) {
+                scrollTopBtn.classList.add('visible');
+            } else {
+                scrollTopBtn.classList.remove('visible');
+            }
+        });
 
-        const COLOR_PALETTE = [
-            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b",
-            "#e377c2", "#7f7f7f", "#bcbd22", "#17becf", "#393b79", "#637939",
-            "#8ca252", "#b5cf6b", "#cedb9c", "#8c6d31", "#bd9e39", "#e7ba52"
-        ];
+        function scrollToTop() {
+            tripListEl.scrollTo({ top: 0, behavior: 'smooth' });
+        }
 
-        // 綁定檔案上傳監聽
-        document.getElementById('excel-file').addEventListener('change', (e) => handleFileUpload(e, 'TARGET'));
         document.getElementById('depot-file').addEventListener('change', (e) => handleFileUpload(e, 'DEPOT'));
+        document.getElementById('excel-file').addEventListener('change', (e) => handleFileUpload(e, 'STOPS'));
 
-        function handleFileUpload(e, mode) {
+        function handleFileUpload(e, type) {
             const file = e.target.files[0];
             if (!file) return;
 
-            document.getElementById('status-info').innerText = `正在讀取 ${mode === 'DEPOT' ? '出發點' : '目標點'} 檔案...`;
-
             const reader = new FileReader();
-            reader.onload = function(evt) {
+            reader.onload = (evt) => {
                 try {
                     const data = new Uint8Array(evt.target.result);
                     const workbook = XLSX.read(data, { type: 'array' });
-                    
                     let allRows = [];
-                    workbook.SheetNames.forEach(sheetName => {
-                        const sheet = workbook.Sheets[sheetName];
-                        const rows = XLSX.utils.sheet_to_json(sheet);
-                        rows.forEach(r => r['_sheet_name'] = sheetName);
-                        allRows = allRows.concat(rows);
+                    workbook.SheetNames.forEach(name => {
+                        allRows = allRows.concat(XLSX.utils.sheet_to_json(workbook.Sheets[name]));
                     });
+                    if (allRows.length === 0) return alert("檔案無有效資料！");
 
-                    if (allRows.length === 0) {
-                        alert("此試算表無有效資料！");
-                        return;
-                    }
-
-                    if (mode === 'DEPOT') {
-                        processDepotData(allRows);
-                    } else {
-                        processTargetData(allRows, workbook.SheetNames);
-                    }
+                    if (type === 'DEPOT') parseDepots(allRows);
+                    else parseStops(allRows);
                 } catch (err) {
-                    alert("檔案解析失敗: " + err.message);
-                    console.error(err);
+                    alert("解析失敗：" + err.message);
                 }
             };
             reader.readAsArrayBuffer(file);
         }
 
-        // ==========================================
-        // 出發點處理
-        // ==========================================
-        function processDepotData(rows) {
-            const columns = Object.keys(rows[0]).filter(k => k !== '_sheet_name');
-            const mapping = classifyColumns(rows, columns);
-
-            if (!mapping.lat || !mapping.lon) {
-                alert("無法在出發點檔案中找到有效經緯度欄位！");
-                return;
-            }
-
-            const nameCol = columns.find(c => ['起點名稱', '出發點', '站點名稱', '倉庫名稱', '倉庫', '名稱'].includes(c)) || columns[0];
-            const codeCol = columns.find(c => ['起點編號', '出發站代碼', '倉庫代碼', '站點代號', '代碼'].includes(c));
-
-            currentDepotRows = rows.map((r, i) => ({
-                lat: parseFloat(r[mapping.lat]),
-                lon: parseFloat(r[mapping.lon]),
-                name: String(r[nameCol] || `出發站_${i + 1}`),
-                code: codeCol ? String(r[codeCol]) : `DEPOT_${i + 1}`,
-                address: r[mapping.address] || '無詳細地址'
-            })).filter(d => !isNaN(d.lat) && !isNaN(d.lon) && d.lat !== 0 && d.lon !== 0);
-
-            renderDepotsOnMap();
-            updateAllVisuals();
-        }
-
-        function renderDepotsOnMap() {
-            depotLayer.clearLayers();
-
-            currentDepotRows.forEach(depot => {
-                const customIcon = L.divIcon({
-                    className: 'depot-div-icon',
-                    html: `<div class="depot-marker-pulse" title="出發點">🚩</div>`,
-                    iconSize: [22, 22],
-                    iconAnchor: [11, 11]
-                });
-
-                const popupHtml = `
-                    <div style="font-size: 13px; line-height: 1.6;">
-                        <b style="color: #dc2626; font-size: 14px;">🚩 【出發站點 / 倉庫】</b><br>
-                        <b>名稱:</b> ${depot.name}<br>
-                        <b>代碼:</b> ${depot.code}<br>
-                        <b>地址:</b> ${depot.address}<br>
-                        <b>經緯度:</b> ${depot.lat.toFixed(5)}, ${depot.lon.toFixed(5)}
-                    </div>
-                `;
-
-                L.marker([depot.lat, depot.lon], { icon: customIcon })
-                    .bindPopup(popupHtml)
-                    .addTo(depotLayer);
-            });
-
-            const depotBadge = document.getElementById('depot-badge');
-            if (currentDepotRows.length > 0) {
-                depotBadge.innerText = `已載入 ${currentDepotRows.length} 個點`;
-                depotBadge.className = 'badge depot';
-            }
-        }
-
-        // ==========================================
-        // 目標配送點處理
-        // ==========================================
-        function processTargetData(rows, sheetNames) {
-            const columns = Object.keys(rows[0]).filter(k => k !== '_sheet_name');
-
-            const docType = classifyDocumentType(columns, sheetNames, rows.length);
-            updateDocTypeBadge(docType);
-
-            const mapping = classifyColumns(rows, columns);
-            updateMappingBadges(mapping);
-
-            if (!mapping.lat || !mapping.lon) {
-                document.getElementById('status-info').innerText = "缺少地理座標，無法呈現地圖！";
-                alert("未能識別出目標單號的經緯度座標欄位！");
-                return;
-            }
-
-            // 支援如果目標表內已自帶起點 (順序 == 0) 自動提煉
-            checkAndExtractInlineDepots(rows, mapping);
-
-            currentTargetRows = rows;
-            currentTargetMapping = mapping;
-
-            renderTargetsOnMap();
-            updateAllVisuals();
-        }
-
-        function checkAndExtractInlineDepots(rows, mapping) {
-            if (currentDepotRows.length > 0) return;
-
-            const seqCol = Object.keys(rows[0]).find(c => ['順序', '配送順序', '站序'].includes(c));
-            const typeCol = Object.keys(rows[0]).find(c => ['類型', '站點類型', '型態'].includes(c));
-
-            const detectedDepots = [];
-            rows.forEach((r, idx) => {
-                const isSeqZero = seqCol && String(r[seqCol]).trim() === '0';
-                const isTypeDepot = typeCol && /起點|出發|倉庫|轉運|depot/i.test(String(r[typeCol]));
-
-                if (isSeqZero || isTypeDepot) {
-                    const lat = parseFloat(r[mapping.lat]);
-                    const lon = parseFloat(r[mapping.lon]);
-                    if (!isNaN(lat) && !isNaN(lon) && lat !== 0) {
-                        detectedDepots.push({
-                            lat, lon,
-                            name: r['客戶名稱'] || r['站點名稱'] || `內嵌出發點_${idx + 1}`,
-                            address: r[mapping.address] || '表內起點',
-                            code: String(r[mapping.group] || `DEPOT_${idx + 1}`)
-                        });
-                    }
-                }
-            });
-
-            if (detectedDepots.length > 0) {
-                currentDepotRows = detectedDepots;
-                renderDepotsOnMap();
-            }
-        }
-
-        function renderTargetsOnMap() {
-            markerLayer.clearLayers();
-
-            const groupColorMap = {};
-            const groupCounts = {};
-            let colorIdx = 0;
-            let validCount = 0;
-
-            currentTargetRows.forEach(row => {
-                const lat = parseFloat(row[currentTargetMapping.lat]);
-                const lon = parseFloat(row[currentTargetMapping.lon]);
-                const groupVal = String(row[currentTargetMapping.group] || '未分類');
-
-                if (isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) return;
-                if (row['順序'] === 0 || row['順序'] === '0') return; // 起點不重複畫圓點
-
-                validCount++;
-
-                if (!groupColorMap[groupVal]) {
-                    groupColorMap[groupVal] = COLOR_PALETTE[colorIdx % COLOR_PALETTE.length];
-                    colorIdx++;
-                    groupCounts[groupVal] = 0;
-                }
-                groupCounts[groupVal]++;
-
-                let extraDetail = '';
-                if (row['車號']) extraDetail += `<b>車號:</b> ${row['車號']}<br>`;
-                if (row['順序']) extraDetail += `<b>配送順序:</b> 第 ${row['順序']} 站<br>`;
-
-                const popupContent = `
-                    <div style="font-size: 13px; line-height: 1.6;">
-                        <b style="color: #0284c7;">【${currentTargetMapping.group}】:</b> ${groupVal}<br>
-                        <b>地址:</b> ${row[currentTargetMapping.address] || '無'}<br>
-                        ${extraDetail}
-                        <b>經緯度:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
-                    </div>
-                `;
-
-                const marker = L.circleMarker([lat, lon], {
-                    radius: 6,
-                    fillColor: groupColorMap[groupVal],
-                    color: "#0f172a",
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.85
-                }).bindPopup(popupContent);
-
-                markerLayer.addLayer(marker);
-            });
-
-            document.getElementById('status-info').innerText = 
-                `載入完成：${validCount} 筆配送點，${currentDepotRows.length} 個出發點`;
-
-            updateLegend(groupColorMap, groupCounts, currentTargetMapping.group);
-        }
-
-        // ==========================================
-        // 呼叫 Python 後端最佳路徑演算法 (FastAPI)
-        // ==========================================
-        async function requestRouteOptimization() {
-            if (currentDepotRows.length === 0) {
-                alert("請先上傳包含經緯度的「出發點檔案」！");
-                return;
-            }
-            if (currentTargetRows.length === 0 || !currentTargetMapping) {
-                alert("請先上傳包含配送資訊的「配送目標單號」！");
-                return;
-            }
-
-            document.getElementById('status-info').innerText = "AI 正在呼叫 OSRM 與 2-opt 演算法排程中...";
-
-            // 整理給後端的 Payload
-            const depotsPayload = currentDepotRows.map(d => ({
-                id: d.code,
-                name: d.name,
-                lat: d.lat,
-                lon: d.lon
-            }));
-
-            const stopsPayload = currentTargetRows.map((r, i) => ({
-                order_id: String(r[currentTargetMapping.group] || `ORD_${i}`),
-                stop_id: String(r['客單編號'] || r['出貨單號'] || i),
-                name: String(r['客戶名稱'] || r['站點名稱'] || ''),
-                address: String(r[currentTargetMapping.address] || ''),
-                lat: parseFloat(r[currentTargetMapping.lat]),
-                lon: parseFloat(r[currentTargetMapping.lon])
-            })).filter(s => !isNaN(s.lat) && !isNaN(s.lon) && s.lat !== 0);
-
-            try {
-                const response = await fetch("http://127.0.0.1:8000/api/optimize-route", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ depots: depotsPayload, stops: stopsPayload })
-                });
-
-                if (!response.ok) {
-                    const errDetail = await response.text();
-                    throw new Error(`伺服器錯誤 (${response.status}): ${errDetail}`);
-                }
-
-                const result = await response.json();
-                if (result.status === "success") {
-                    renderOptimizedRoutes(result.routes);
-                } else {
-                    alert("最佳化失敗: " + JSON.stringify(result));
-                }
-            } catch (err) {
-                alert("無法連接後端排程服務，請確認 python optimizer_service.py 已啟動！\n錯誤: " + err.message);
-                document.getElementById('status-info').innerText = "排程呼叫失敗，請檢查後端服務。";
-            }
-        }
-
-        function renderOptimizedRoutes(routes) {
-            polylineLayer.clearLayers();
-
-            routes.forEach((route, idx) => {
-                const routeColor = COLOR_PALETTE[idx % COLOR_PALETTE.length];
-
-                // 1. 繪製實際路徑 Polyline
-                if (route.polyline && route.polyline.length > 0) {
-                    L.polyline(route.polyline, {
-                        color: routeColor,
-                        weight: 5,
-                        opacity: 0.85
-                    }).bindPopup(`<b>路線：${route.depot_name} 出發</b><br>總停靠點: ${route.total_stops}<br>預估里程: ${route.total_distance_km} km<br>預估行車時間: ${route.estimated_duration_min} 分鐘`)
-                      .addTo(polylineLayer);
-                }
-
-                // 2. 標記各站抵達順序 (Badge)
-                let stopSeqCounter = 1;
-                route.sequence.forEach(stop => {
-                    if (stop.type === 'DEPOT') return;
-
-                    const seqLabelIcon = L.divIcon({
-                        className: 'stop-label-icon',
-                        html: `<span class="stop-seq-label" style="background:${routeColor};">#${stopSeqCounter}</span>`,
-                        iconSize: [30, 20],
-                        iconAnchor: [15, -6]
-                    });
-
-                    L.marker([stop.lat, stop.lon], { icon: seqLabelIcon }).addTo(polylineLayer);
-                    stopSeqCounter++;
-                });
-            });
-
-            // 聚焦到所有路徑範圍
-            if (polylineLayer.getLayers().length > 0) {
-                map.fitBounds(polylineLayer.getBounds().pad(0.08));
-            }
-            document.getElementById('status-info').innerText = `最佳化完成！已規劃 ${routes.length} 條配送路線`;
-        }
-
-        // ==========================================
-        // 輔助判斷與視覺同步
-        // ==========================================
-        function updateAllVisuals() {
-            const allLayers = [];
-            if (markerLayer.getLayers().length > 0) allLayers.push(markerLayer);
-            if (depotLayer.getLayers().length > 0) allLayers.push(depotLayer);
-
-            if (allLayers.length > 0) {
-                const combined = L.featureGroup(allLayers);
-                map.fitBounds(combined.getBounds().pad(0.08));
-            }
-        }
-
-        function classifyDocumentType(cols, sheetNames, rowCount) {
-            const hasCarmFields = ['結案材積', '客單編號', '出貨單號', '早、晚班車次'].some(k => cols.includes(k));
-            const hasVrpFields = ['正規化地址', 'x座標', 'y座標', '順序', '排序序號'].some(k => cols.includes(k));
-            const hasCoordFields = cols.includes('Latitude') && cols.includes('Longitude') && cols.includes('座標狀態');
-
-            if (hasCoordFields) return { type: 'COORD_MATCH', label: '地理座標對照檔', class: 'success' };
-            if (hasVrpFields) return { type: 'VRP_SCHEDULE', label: 'VRP 排程最佳化檔', class: 'info' };
-            if (hasCarmFields) return { type: 'CARM3100_RAW', label: 'ERP 原始貨況檔', class: 'warning' };
-            return { type: 'GENERIC', label: '自訂配送單號資料', class: 'info' };
-        }
-
-        function classifyColumns(rows, columns) {
+        function classifyCoords(rows, cols) {
             let latCol = null, lonCol = null;
-            let groupCol = null, addressCol = null;
-
-            columns.forEach(col => {
+            cols.forEach(col => {
                 const lower = col.toLowerCase();
                 const sampleVals = rows.slice(0, 30).map(r => parseFloat(r[col])).filter(v => !isNaN(v) && v !== 0);
                 if (sampleVals.length === 0) return;
-
+                
                 const avg = sampleVals.reduce((a, b) => a + b, 0) / sampleVals.length;
-                if ((lower.includes('lon') || lower.includes('lng') || lower.includes('x') || lower.includes('經度')) && avg > 118 && avg < 123) {
+                if (avg > 118 && avg < 123 && (lower.includes('lon') || lower.includes('lng') || lower.includes('x') || lower.includes('經度'))) {
                     lonCol = col;
-                } else if ((lower.includes('lat') || lower.includes('y') || lower.includes('緯度')) && avg > 21 && avg < 26) {
+                } else if (avg > 21 && avg < 26 && (lower.includes('lat') || lower.includes('y') || lower.includes('緯度'))) {
                     latCol = col;
                 }
             });
-
-            const groupCandidates = ['組別', '派車單號', '單號', '訂單編號', '車次說明'];
-            for (let cand of groupCandidates) {
-                if (columns.includes(cand)) { groupCol = cand; break; }
-            }
-
-            const addrCandidates = ['正規化地址', '提貨人地址', '地址', '客戶地址', '起點地址'];
-            for (let cand of addrCandidates) {
-                if (columns.includes(cand)) { addressCol = cand; break; }
-            }
-
-            return { lat: latCol, lon: lonCol, group: groupCol || '派車單號', address: addressCol || '地址' };
+            if (!latCol) latCol = cols.find(c => /lat|緯度|^y$/i.test(c));
+            if (!lonCol) lonCol = cols.find(c => /lon|lng|經度|^x$/i.test(c));
+            return { latCol, lonCol };
         }
 
-        function updateDocTypeBadge(docType) {
-            const b = document.getElementById('doc-type-badge');
-            b.innerText = docType.label;
-            b.className = 'badge ' + docType.class;
+        function parseDepots(rows) {
+            const cols = Object.keys(rows[0]);
+            const { latCol, lonCol } = classifyCoords(rows, cols);
+            if (!latCol || !lonCol) return alert("出發點檔案找不到有效的經緯度欄位！");
+
+            const nameCol = cols.find(c => /名稱|起點|倉庫|站名/i.test(c)) || cols[0];
+            const idCol = cols.find(c => /代碼|編號|id/i.test(c)) || nameCol;
+
+            depotStore = rows.map((r, i) => ({
+                id: String(r[idCol] || `DEPOT_${i + 1}`),
+                name: String(r[nameCol] || `出發站_${i + 1}`),
+                lat: parseFloat(r[latCol]),
+                lon: parseFloat(r[lonCol])
+            })).filter(d => !isNaN(d.lat) && !isNaN(d.lon));
+
+            renderDepots();
+            autoAssignDepots();
+            renderSidebar();
+            checkReadyState();
         }
 
-        function updateMappingBadges(mapping) {
-            const coordBadge = document.getElementById('coords-mapping-badge');
-            if (mapping.lat && mapping.lon) {
-                coordBadge.innerText = `X:${mapping.lon} / Y:${mapping.lat}`;
-                coordBadge.className = 'badge success';
-            }
-            const groupBadge = document.getElementById('group-field-badge');
-            groupBadge.innerText = mapping.group;
-            groupBadge.className = 'badge info';
-        }
+        function parseStops(rows) {
+            const cols = Object.keys(rows[0]);
+            const { latCol, lonCol } = classifyCoords(rows, cols);
+            if (!latCol || !lonCol) return alert("配送目標檔案找不到有效的經緯度欄位！");
 
-        function updateLegend(colorMap, countMap, groupTitle) {
-            if (legendControl) map.removeControl(legendControl);
+            let dateCol = cols.find(c => /日期|時間|出貨日|date/i.test(c));
+            let orderCol = cols.find(c => /組別|派車單號|車次|行程/i.test(c));
+            if (!orderCol) orderCol = cols.find(c => /單號/i.test(c)) || '預設車次';
+            let stopCol = cols.find(c => /客單編號|出貨單號|站點編號|包裹/i.test(c));
+            if (!stopCol && cols.includes('單號') && orderCol !== '單號') stopCol = '單號';
+            if (!stopCol) stopCol = cols.find(c => /序號/i.test(c)) || cols[0];
 
-            legendControl = L.control({ position: 'topright' });
-            legendControl.onAdd = function() {
-                const div = L.DomUtil.create('div', 'legend-box');
-                div.innerHTML = `<h4>圖例分類</h4>`;
+            const nameCol = cols.find(c => /客戶名稱|站點名稱|收件人|名稱|提貨人姓名/i.test(c));
+            const addrCol = cols.find(c => /提貨人地址|正規化地址|地址|客戶地址/i.test(c));
+            const itemCol = cols.find(c => /貨品名稱|品項|品名|商品|配送物|貨物/i.test(c));
+            const weightCol = cols.find(c => /重量|貨重|kg|公斤/i.test(c));
+            const volCol = cols.find(c => /總材積|結案材積|材積|cbm|體積/i.test(c));
 
-                if (currentDepotRows.length > 0) {
-                    div.innerHTML += `
-                        <div class="legend-row" style="font-weight: 600; color: #dc2626;">
-                            <span style="margin-right: 6px;">🚩</span>
-                            <span>出發點/倉儲 (${currentDepotRows.length})</span>
-                        </div>
-                        <div style="border-bottom: 1px dashed #cbd5e1; margin: 4px 0 8px 0;"></div>
-                    `;
+            tripStore = {};
+            let colorIdx = 0;
+            const usedCoords = new Set(); 
+
+            expandedDates.clear();
+
+            rows.forEach((r, idx) => {
+                let lat = parseFloat(r[latCol]);
+                let lon = parseFloat(r[lonCol]);
+                if (isNaN(lat) || isNaN(lon) || lat === 0 || lon === 0) return;
+
+                const coordKey = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+                if (usedCoords.has(coordKey)) {
+                    lat += (Math.random() - 0.5) * 0.0002; 
+                    lon += (Math.random() - 0.5) * 0.0002;
+                }
+                usedCoords.add(`${lat.toFixed(5)},${lon.toFixed(5)}`);
+
+                const dateVal = dateCol && r[dateCol] ? String(r[dateCol]) : '未分類日期';
+                const orderId = String(r[orderCol] || '未分類行程');
+                
+                const tripKey = `${dateVal}_${orderId}`;
+
+                if (!tripStore[tripKey]) {
+                    tripStore[tripKey] = {
+                        trip_key: tripKey,
+                        date: dateVal,
+                        order_id: orderId,
+                        color: COLOR_PALETTE[colorIdx % COLOR_PALETTE.length],
+                        assigned_depot: null, stops: [],
+                        is_selected: true, is_visible: true, is_computed: false
+                    };
+                    colorIdx++;
                 }
 
-                div.innerHTML += `<div style="font-size: 11px; color: #64748b; margin-bottom: 4px;">配送分群 (${groupTitle})</div>`;
-                for (const [grp, col] of Object.entries(colorMap)) {
-                    div.innerHTML += `
-                        <div class="legend-row">
-                            <div class="color-dot" style="background:${col};"></div>
-                            <span>${grp} (${countMap[grp]})</span>
+                tripStore[tripKey].stops.push({
+                    stop_id: String(r[stopCol] || `STOP_${idx + 1}`),
+                    trip_key: tripKey,
+                    date: dateVal,
+                    order_id: orderId, 
+                    original_order_id: orderId,
+                    name: nameCol && r[nameCol] ? String(r[nameCol]) : `站點_${idx + 1}`,
+                    address: addrCol && r[addrCol] ? String(r[addrCol]) : '',
+                    lat: lat, lon: lon,
+                    item_name: itemCol && r[itemCol] ? String(r[itemCol]) : undefined,
+                    weight_kg: weightCol && !isNaN(parseFloat(r[weightCol])) ? parseFloat(r[weightCol]) : undefined,
+                    volume_cbm: volCol && !isNaN(parseFloat(r[volCol])) ? parseFloat(r[volCol]) : undefined,
+                    status: 'ACTIVE'
+                });
+            });
+
+            autoAssignDepots();
+            renderSidebar();
+            renderAllMapLayers();
+            checkReadyState();
+        }
+
+        function autoAssignDepots() {
+            if (depotStore.length === 0) return;
+            Object.values(tripStore).forEach(trip => {
+                if (trip.assigned_depot && trip.assigned_depot.is_manual) return;
+                const activeStops = trip.stops.filter(s => s.status === 'ACTIVE');
+                if (activeStops.length === 0) return;
+
+                const centerLat = activeStops.reduce((sum, s) => sum + s.lat, 0) / activeStops.length;
+                const centerLon = activeStops.reduce((sum, s) => sum + s.lon, 0) / activeStops.length;
+
+                let closestDepot = depotStore[0];
+                let minDist = Infinity;
+                depotStore.forEach(d => {
+                    const dist = Math.hypot(d.lat - centerLat, d.lon - centerLon);
+                    if (dist < minDist) { minDist = dist; closestDepot = d; }
+                });
+                trip.assigned_depot = { ...closestDepot, is_manual: false };
+            });
+        }
+
+        function renderDepots() {
+            depotLayer.clearLayers();
+            depotStore.forEach(d => {
+                const icon = L.divIcon({
+                    className: 'depot-marker',
+                    html: `<div style="background:#dc2626; color:#fff; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; border:2px solid #fff; font-size:11px; box-shadow:0 2px 5px rgba(0,0,0,0.3);">🚩</div>`,
+                    iconSize: [22, 22],
+                    iconAnchor: [11, 11]
+                });
+                L.marker([d.lat, d.lon], { icon })
+                    .bindPopup(`<b>🚩 出發點: ${d.name}</b><br>代碼: ${d.id}`)
+                    .addTo(depotLayer);
+            });
+            if (depotStore.length > 0) map.fitBounds(depotLayer.getBounds().pad(0.1));
+        }
+
+        function renderSidebar() {
+            const listEl = document.getElementById('trip-list');
+            const trips = Object.values(tripStore);
+
+            if (trips.length === 0) {
+                listEl.innerHTML = `<div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">尚未載入單號資料</div>`;
+                return;
+            }
+
+            const totalStops = trips.reduce((sum, t) => sum + t.stops.length, 0);
+            const uniqueDates = new Set(trips.map(t => t.date));
+            document.getElementById('summary-meta').innerText = `共 ${uniqueDates.size} 天，${trips.length} 個車次，${totalStops} 個站點`;
+
+            listEl.innerHTML = '';
+
+            const groupedByDate = {};
+            trips.forEach(t => {
+                if (!groupedByDate[t.date]) groupedByDate[t.date] = [];
+                groupedByDate[t.date].push(t);
+            });
+
+            Object.keys(groupedByDate).sort().forEach(date => {
+                const dateTrips = groupedByDate[date];
+                const allSelected = dateTrips.every(t => t.is_selected);
+                const someSelected = dateTrips.some(t => t.is_selected);
+                
+                const isExpanded = expandedDates.has(date);
+
+                const dateGroup = document.createElement('div');
+                dateGroup.className = 'date-group';
+                
+                dateGroup.innerHTML = `
+                    <div class="date-header" data-date="${date}" onclick="toggleDateCollapse(this.getAttribute('data-date'))">
+                        <div class="date-title-group">
+                            <input type="checkbox" data-date="${date}" ${allSelected ? 'checked' : ''} 
+                                onclick="event.stopPropagation(); toggleDateSelect(this.getAttribute('data-date'), this.checked)" />
+                            <span>📅 ${date}</span>
+                            <span style="font-size:11px; font-weight:normal; color:#64748b; margin-left:4px;">(${dateTrips.length} 車)</span>
+                        </div>
+                        <span class="toggle-icon ${isExpanded ? '' : 'collapsed'}">▼</span>
+                    </div>
+                    <div class="date-content ${isExpanded ? '' : 'hidden'}"></div>
+                `;
+
+                const dateCheckbox = dateGroup.querySelector('input[type="checkbox"]');
+                if (!allSelected && someSelected) dateCheckbox.indeterminate = true;
+
+                const contentEl = dateGroup.querySelector('.date-content');
+
+                dateTrips.forEach(trip => {
+                    const activeCount = trip.stops.filter(s => s.status === 'ACTIVE').length;
+                    const totalWeight = trip.stops.reduce((sum, s) => sum + (s.status === 'ACTIVE' && s.weight_kg ? s.weight_kg : 0), 0);
+                    const totalVol = trip.stops.reduce((sum, s) => sum + (s.status === 'ACTIVE' && s.volume_cbm ? s.volume_cbm : 0), 0);
+
+                    let depotOptions = depotStore.map(d => 
+                        `<option value="${d.id}" ${trip.assigned_depot && trip.assigned_depot.id === d.id ? 'selected' : ''}>${d.name}</option>`
+                    ).join('');
+
+                    const card = document.createElement('div');
+                    card.className = 'trip-card';
+                    card.innerHTML = `
+                        <div class="trip-card-header">
+                            <div class="trip-title-group">
+                                <input type="checkbox" data-tripkey="${trip.trip_key}" ${trip.is_selected ? 'checked' : ''} 
+                                    onchange="toggleTripSelect(this.getAttribute('data-tripkey'), this.checked)" />
+                                <div class="trip-color-dot" style="background:${trip.color}"></div>
+                                <span class="trip-id">${trip.order_id}</span>
+                            </div>
+                            <span class="badge-count">${activeCount} 站</span>
+                        </div>
+                        <div class="trip-stats">
+                            <span>⚖️ ${totalWeight.toFixed(1)} kg</span>
+                            <span>📐 ${totalVol.toFixed(2)} cbm</span>
+                        </div>
+                        <div class="depot-select-row">
+                            <span>出發：</span>
+                            <select data-tripkey="${trip.trip_key}" onchange="updateTripDepot(this.getAttribute('data-tripkey'), this.value)">
+                                ${depotOptions || '<option>無可用起點</option>'}
+                            </select>
                         </div>
                     `;
+                    contentEl.appendChild(card);
+                });
+
+                listEl.appendChild(dateGroup);
+            });
+        }
+
+        function toggleDateCollapse(date) {
+            if (expandedDates.has(date)) {
+                expandedDates.delete(date); 
+            } else {
+                expandedDates.add(date);    
+            }
+            renderSidebar(); 
+        }
+
+        function toggleDateSelect(date, checked) {
+            Object.values(tripStore).forEach(t => {
+                if (t.date === date) {
+                    t.is_selected = checked;
+                    t.is_visible = checked;
                 }
-                return div;
-            };
-            legendControl.addTo(map);
+            });
+            renderSidebar();
+            renderAllMapLayers();
+        }
+
+        function toggleSelectAll(select) {
+            Object.values(tripStore).forEach(t => { t.is_selected = select; t.is_visible = select; });
+            renderSidebar();
+            renderAllMapLayers();
+        }
+
+        function toggleTripSelect(tripKey, checked) {
+            if (tripStore[tripKey]) { 
+                tripStore[tripKey].is_selected = checked; 
+                tripStore[tripKey].is_visible = checked; 
+                renderSidebar(); 
+                renderAllMapLayers(); 
+            }
+        }
+
+        function updateTripDepot(tripKey, depotId) {
+            const depot = depotStore.find(d => d.id === depotId);
+            if (depot && tripStore[tripKey]) {
+                tripStore[tripKey].assigned_depot = { ...depot, is_manual: true };
+                tripStore[tripKey].is_computed = false;
+            }
+        }
+
+        function checkReadyState() {
+            const hasData = Object.keys(tripStore).length > 0 && depotStore.length > 0;
+            document.getElementById('btn-execute').disabled = !hasData;
+            document.getElementById('btn-clear').disabled = !hasData; // 控制清除按鈕
+        }
+
+        // 【新增】清除所有計算結果的函式
+        function clearAllRoutes() {
+            if (!confirm("確定要清除所有地圖上的計算結果嗎？(不會刪除站點資料)")) return;
+            
+            Object.values(tripStore).forEach(trip => {
+                trip.is_computed = false;
+                trip.route_result = null; // 清空路線資料
+            });
+            
+            renderAllMapLayers(); // 重繪地圖 (只剩原始站點圓點)
+        }
+
+        function renderAllMapLayers() {
+            Object.keys(tripLayerGroups).forEach(id => {
+                map.removeLayer(tripLayerGroups[id]);
+                delete tripLayerGroups[id];
+            });
+
+            const allBounds = [];
+            Object.values(tripStore).forEach(trip => {
+                if (!trip.is_visible) return;
+
+                const layerGroup = L.layerGroup().addTo(map);
+                tripLayerGroups[trip.trip_key] = layerGroup;
+
+                if (trip.is_computed && trip.route_result) {
+                    if (trip.route_result.polyline && trip.route_result.polyline.length > 0) {
+                        L.polyline(trip.route_result.polyline, { color: trip.color, weight: 5, opacity: 0.8 }).addTo(layerGroup);
+                    }
+                    if (trip.route_result.sequence) {
+                        let stopSeqCounter = 1;
+                        trip.route_result.sequence.forEach(seqStop => {
+                            if (seqStop.type === 'DEPOT') return;
+                            const seqLabelIcon = L.divIcon({
+                                className: 'stop-label-icon',
+                                html: `<span class="stop-seq-label" style="background:${trip.color};">#${stopSeqCounter}</span>`,
+                                iconSize: [30, 20],
+                                iconAnchor: [15, -6]
+                            });
+                            L.marker([seqStop.lat, seqStop.lon], { icon: seqLabelIcon }).addTo(layerGroup);
+                            stopSeqCounter++;
+                        });
+                    }
+                }
+
+                trip.stops.forEach(stop => {
+                    const isCancelled = stop.status === 'CANCELLED';
+                    const markerColor = isCancelled ? '#94a3b8' : trip.color;
+                    const marker = L.circleMarker([stop.lat, stop.lon], {
+                        radius: 6, fillColor: markerColor, color: "#ffffff", weight: 1.5, opacity: 1, fillOpacity: isCancelled ? 0.3 : 0.9
+                    });
+                    marker.bindPopup(() => createStopPopupContent(stop, trip));
+                    marker.addTo(layerGroup);
+                    allBounds.push([stop.lat, stop.lon]);
+                });
+            });
+
+            if (allBounds.length > 0) map.fitBounds(L.latLngBounds(allBounds).pad(0.08));
+        }
+
+        function createStopPopupContent(stop, currentTrip) {
+            const isCancelled = stop.status === 'CANCELLED';
+            const dynamicProps = [];
+            if (stop.item_name) dynamicProps.push(`<div class="prop-item">📦 品名: <b>${stop.item_name}</b></div>`);
+            if (stop.weight_kg) dynamicProps.push(`<div class="prop-item">⚖️ 重量: <b>${stop.weight_kg} kg</b></div>`);
+            if (stop.volume_cbm) dynamicProps.push(`<div class="prop-item">📐 材積: <b>${stop.volume_cbm} cbm</b></div>`);
+
+            const otherTripOptions = Object.values(tripStore)
+                .filter(t => t.trip_key !== currentTrip.trip_key)
+                .map(t => `<option value="${t.trip_key}">${t.date} - ${t.order_id}</option>`).join('');
+
+            return `
+                <div class="stop-popup">
+                    <div class="stop-popup-title" style="color:${currentTrip.color};">${stop.name} (${stop.stop_id})</div>
+                    <div class="prop-item">📅 當前日期: <b>${stop.date}</b></div>
+                    <div class="prop-item">🚗 當前車次: <b>${stop.order_id}</b></div>
+                    <div class="prop-item">📍 地址: ${stop.address || '無'}</div>
+                    ${dynamicProps.join('')}
+                    <div class="action-row">
+                        ${isCancelled ? 
+                            `<button class="btn-popup-restore" onclick="restoreStop('${stop.trip_key}', '${stop.stop_id}')">🔄 恢復此站點</button>` :
+                            `<button class="btn-popup-cancel" onclick="cancelStop('${stop.trip_key}', '${stop.stop_id}')">❌ 取消此站點</button>`
+                        }
+                        <div class="transfer-group">
+                            <select id="transfer-select-${stop.stop_id}">${otherTripOptions}</select>
+                            <button onclick="transferStop('${stop.trip_key}', '${stop.stop_id}')">🤝 轉單</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function cancelStop(tripKey, stopId) {
+            const stop = tripStore[tripKey].stops.find(s => s.stop_id === stopId);
+            if (stop) { stop.status = 'CANCELLED'; tripStore[tripKey].is_computed = false; renderSidebar(); renderAllMapLayers(); map.closePopup(); }
+        }
+
+        function restoreStop(tripKey, stopId) {
+            const stop = tripStore[tripKey].stops.find(s => s.stop_id === stopId);
+            if (stop) { stop.status = 'ACTIVE'; tripStore[tripKey].is_computed = false; renderSidebar(); renderAllMapLayers(); map.closePopup(); }
+        }
+
+        function transferStop(fromTripKey, stopId) {
+            const selectEl = document.getElementById(`transfer-select-${stopId}`);
+            if (!selectEl) return;
+            
+            const targetTripKey = selectEl.value;
+            const fromTrip = tripStore[fromTripKey];
+            const toTrip = tripStore[targetTripKey];
+            if (!fromTrip || !toTrip) return;
+
+            const stopIdx = fromTrip.stops.findIndex(s => s.stop_id === stopId);
+            if (stopIdx === -1) return;
+
+            const [transferredStop] = fromTrip.stops.splice(stopIdx, 1);
+            transferredStop.trip_key = targetTripKey;
+            transferredStop.date = toTrip.date;
+            transferredStop.order_id = toTrip.order_id;
+            transferredStop.status = 'ACTIVE';
+            toTrip.stops.push(transferredStop);
+
+            fromTrip.is_computed = false; toTrip.is_computed = false;
+            renderSidebar(); renderAllMapLayers(); map.closePopup();
+        }
+
+        async function runQueueOptimization() {
+            const selectedTrips = Object.values(tripStore).filter(t => t.is_selected);
+            if (selectedTrips.length === 0) return alert("請至少勾選一個車次進行計算！");
+
+            const progressWrap = document.getElementById('progress-bar-wrap');
+            const progressBar = document.getElementById('progress-bar');
+            const runBtn = document.getElementById('btn-execute');
+            const clearBtn = document.getElementById('btn-clear');
+
+            progressWrap.style.display = 'block'; 
+            runBtn.disabled = true;
+            clearBtn.disabled = true;
+
+            for (let i = 0; i < selectedTrips.length; i++) {
+                const trip = selectedTrips[i];
+                const activeStops = trip.stops.filter(s => s.status === 'ACTIVE');
+
+                runBtn.innerText = `⏳ (${i + 1}/${selectedTrips.length}) 計算 [${trip.date}] ${trip.order_id}...`;
+                progressBar.style.width = `${Math.round(((i + 1) / selectedTrips.length) * 100)}%`;
+
+                if (activeStops.length > 0 && trip.assigned_depot) {
+                    try {
+                        const payload = { 
+                            date: trip.date,
+                            order_id: trip.order_id, 
+                            depot: trip.assigned_depot, 
+                            stops: activeStops 
+                        };
+                        const resp = await fetch("http://127.0.0.1:8000/api/optimize-single-trip", {
+                            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+                        });
+
+                        if (resp.ok) {
+                            const result = await resp.json();
+                            trip.route_result = {
+                                distance_km: result.total_distance_km, duration_min: result.estimated_duration_min,
+                                polyline: result.polyline, sequence: result.sequence
+                            };
+                            trip.is_computed = true;
+                        }
+                    } catch (err) { console.error(`車次 ${trip.trip_key} 計算失敗:`, err); }
+                }
+                await new Promise(r => setTimeout(r, 150)); 
+            }
+            runBtn.innerText = "🚀 執行計算並輸出";
+            runBtn.disabled = false; 
+            clearBtn.disabled = false;
+            progressWrap.style.display = 'none';
+            renderAllMapLayers();
+            alert("所有選取車次路徑計算完成！");
         }
     </script>
 </body>
