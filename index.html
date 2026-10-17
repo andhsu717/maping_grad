@@ -283,11 +283,11 @@
         }
         .trip-stat-item { display: flex; align-items: center; gap: 4px; }
 
-        /* 紫色框：站點明細 (站點號碼 + 地址) */
+        /* 紫色框：站點明細 (依地址彙總) */
         .trip-stop-list { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
-        .trip-stop-item { display: flex; align-items: baseline; gap: 6px; font-size: 10px; color: #475569; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 4px; padding: 3px 6px; }
-        .trip-stop-no { font-weight: 700; color: #0284c7; flex-shrink: 0; }
-        .trip-stop-addr { color: #64748b; word-break: break-all; }
+        .trip-stop-item { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 10px; color: #475569; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 4px; padding: 3px 6px; }
+        .trip-stop-addr { color: #64748b; word-break: break-all; flex: 1; }
+        .trip-stop-cnt { font-weight: 700; color: #0284c7; flex-shrink: 0; }
         
         .depot-select-row { display: flex; align-items: center; font-size: 11px; color: #475569; }
         .depot-select-row span { margin-right: 2px; }
@@ -327,9 +327,50 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 6px;
         }
         .timeline-header-bar label { font-size: 12px; font-weight: 700; color: #1e293b; }
-        .timeline-header-bar select { font-size: 12px; padding: 4px 8px; border-radius: 4px; border: 1px solid #cbd5e1; max-width: 220px; }
+
+        /* 自製車次下拉 (可顯示顏色點) */
+        .trip-select { position: relative; }
+        .trip-select-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #1e293b;
+            cursor: pointer;
+            max-width: 280px;
+            transition: border-color 0.2s;
+        }
+        .trip-select-btn:hover { border-color: #0284c7; }
+        .trip-select-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+        .trip-select-caret { color: #64748b; font-size: 10px; flex-shrink: 0; }
+        .trip-select-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
+        .trip-select-menu {
+            position: absolute;
+            top: calc(100% + 4px);
+            right: 0;
+            min-width: 230px;
+            max-height: 260px;
+            overflow-y: auto;
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.12);
+            z-index: 1200;
+            display: none;
+            padding: 4px;
+        }
+        .trip-select-menu.open { display: block; }
+        .trip-select-option { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 12px; color: #334155; cursor: pointer; white-space: nowrap; }
+        .trip-select-option:hover { background: #f1f5f9; }
+        .trip-select-option.active { background: #e0f2fe; color: #0284c7; font-weight: 600; }
 
         .timeline-flow-list {
             flex: 1;
@@ -375,6 +416,7 @@
         .node-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
         .node-title { font-size: 13px; font-weight: 700; color: #0f172a; }
         .node-addr { font-size: 11px; color: #475569; word-break: break-all; margin-bottom: 4px; }
+        .node-count-badge { font-size: 10px; background: #e0f2fe; color: #0284c7; padding: 1px 6px; border-radius: 10px; font-weight: 600; border: 1px solid #bae6fd; flex-shrink: 0; }
 
         /* 箭頭樣式 (依需求：現階段以綠色為主) */
         .timeline-arrow-wrap {
@@ -391,6 +433,12 @@
             background: #16a34a; /* 綠色箭頭線條 */
         }
         .timeline-arrow-badge {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            white-space: nowrap;
+            z-index: 1;
             background: #dcfce7;
             color: #15803d;
             border: 1px solid #86efac;
@@ -402,7 +450,6 @@
             align-items: center;
             gap: 6px;
             box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-            margin: 2px 0;
         }
         .timeline-arrow-head {
             width: 0; 
@@ -493,7 +540,14 @@
             <div id="tab-timeline-content">
                 <div class="timeline-header-bar">
                     <label>🚗 選擇已計算車次：</label>
-                    <select id="timeline-trip-select" onchange="renderTimelineView()"></select>
+                    <div class="trip-select" id="timeline-trip-select">
+                        <button type="button" class="trip-select-btn" id="timeline-trip-btn" onclick="toggleTripSelectMenu()">
+                            <span class="trip-select-dot" id="timeline-trip-dot" style="background: transparent;"></span>
+                            <span class="trip-select-label" id="timeline-trip-label">尚無已計算車次</span>
+                            <span class="trip-select-caret">▾</span>
+                        </button>
+                        <div class="trip-select-menu" id="timeline-trip-menu"></div>
+                    </div>
                 </div>
                 <div id="timeline-flow-list" class="timeline-flow-list">
                     <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">
@@ -798,12 +852,23 @@
                         `<option value="${d.id}" ${trip.assigned_depot && trip.assigned_depot.id === d.id ? 'selected' : ''}>${d.name}</option>`
                     ).join('');
 
-                    // 紫色框：站點明細 (站點號碼 + 地址)，已計算優先取合併後順序
-                    const stopList = (trip.is_computed && trip.route_result && trip.route_result.sequence)
-                        ? trip.route_result.sequence.filter(s => s.type === 'STOP').map(s => ({ no: s.stop_id, addr: s.address }))
-                        : trip.stops.filter(s => s.status === 'ACTIVE').map(s => ({ no: s.stop_id, addr: s.address }));
-                    const stopListHtml = stopList.map(s =>
-                        `<div class="trip-stop-item"><span class="trip-stop-no">${s.no}</span><span class="trip-stop-addr">${s.addr || '無地址'}</span></div>`
+                    // 紫色框：站點明細 (依地址彙總，重複地址僅顯示一次並標示站數)
+                    let stopPool;
+                    if (trip.is_computed && trip.route_result && trip.route_result.sequence) {
+                        stopPool = trip.route_result.sequence
+                            .filter(s => s.type === 'STOP')
+                            .map(s => ({ addr: s.address || '無地址', cnt: s.merged_count || 1 }));
+                    } else {
+                        const addrMap = {};
+                        trip.stops.filter(s => s.status === 'ACTIVE').forEach(s => {
+                            const key = (s.address || '').trim() || '無地址';
+                            if (!addrMap[key]) addrMap[key] = { addr: key, cnt: 0 };
+                            addrMap[key].cnt++;
+                        });
+                        stopPool = Object.values(addrMap);
+                    }
+                    const stopListHtml = stopPool.map(s =>
+                        `<div class="trip-stop-item"><span class="trip-stop-addr">${s.addr}</span><span class="trip-stop-cnt">${s.cnt} 站</span></div>`
                     ).join('');
 
                     // 紫色框：高度還原簡報中的潔淨樣式 (Icon與並排資訊)
@@ -973,29 +1038,66 @@
         }
 
         /* ========== 綠色框：行程時間系統時序視圖 ========== */
+        let timelineSelectedTripKey = '';
+        let timelineComputedTrips = [];
+
+        function toggleTripSelectMenu(force) {
+            const menu = document.getElementById('timeline-trip-menu');
+            if (!menu) return;
+            const open = (typeof force === 'boolean') ? force : !menu.classList.contains('open');
+            menu.classList.toggle('open', open);
+        }
+
+        function selectTimelineTrip(index) {
+            const t = timelineComputedTrips[index];
+            if (t) timelineSelectedTripKey = t.trip_key;
+            toggleTripSelectMenu(false);
+            updateTimelineTripOptions();
+            renderTimelineView();
+        }
+
+        document.addEventListener('click', (e) => {
+            const wrap = document.getElementById('timeline-trip-select');
+            if (wrap && !wrap.contains(e.target)) toggleTripSelectMenu(false);
+        });
+
         function updateTimelineTripOptions() {
-            const selectEl = document.getElementById('timeline-trip-select');
-            const computedTrips = Object.values(tripStore).filter(t => t.is_computed && t.route_result);
-            
-            selectEl.innerHTML = '';
-            if (computedTrips.length === 0) {
-                selectEl.innerHTML = '<option value="">尚無已計算車次</option>';
+            const menu = document.getElementById('timeline-trip-menu');
+            const labelEl = document.getElementById('timeline-trip-label');
+            const dotEl = document.getElementById('timeline-trip-dot');
+            if (!menu) return;
+
+            timelineComputedTrips = Object.values(tripStore).filter(t => t.is_computed && t.route_result);
+
+            if (timelineComputedTrips.length === 0) {
+                timelineSelectedTripKey = '';
+                menu.innerHTML = '';
+                labelEl.innerText = '尚無已計算車次';
+                dotEl.style.background = 'transparent';
                 return;
             }
 
-            computedTrips.forEach(t => {
-                const opt = document.createElement('option');
-                opt.value = t.trip_key;
-                opt.innerText = `[${t.date}] ${t.order_id} (${t.route_result.sequence.length - 1} 站點)`;
-                selectEl.appendChild(opt);
-            });
+            if (!timelineComputedTrips.some(t => t.trip_key === timelineSelectedTripKey)) {
+                timelineSelectedTripKey = timelineComputedTrips[0].trip_key;
+            }
+
+            menu.innerHTML = timelineComputedTrips.map((t, i) => {
+                const stationCount = t.route_result.sequence ? t.route_result.sequence.length - 1 : 0;
+                const active = t.trip_key === timelineSelectedTripKey ? 'active' : '';
+                return `<div class="trip-select-option ${active}" onclick="selectTimelineTrip(${i})">
+                    <span class="trip-select-dot" style="background:${t.color};"></span>
+                    <span class="trip-select-label">[${t.date}] ${t.order_id} (${stationCount} 站)</span>
+                </div>`;
+            }).join('');
+
+            const cur = tripStore[timelineSelectedTripKey];
+            labelEl.innerText = `[${cur.date}] ${cur.order_id} (${cur.route_result.sequence.length - 1} 站)`;
+            dotEl.style.background = cur.color;
         }
 
         function renderTimelineView() {
-            const selectEl = document.getElementById('timeline-trip-select');
             const flowContainer = document.getElementById('timeline-flow-list');
-            const selectedTripKey = selectEl.value;
-            const trip = tripStore[selectedTripKey];
+            const trip = tripStore[timelineSelectedTripKey];
 
             if (!trip || !trip.route_result || !trip.route_result.sequence) {
                 flowContainer.innerHTML = `
@@ -1029,9 +1131,9 @@
                         <div class="node-dot" style="background: ${trip.color};">#${item.seq_no}</div>
                         <div class="node-content">
                             <div class="node-title-row">
-                                <span class="node-title">站點號碼: ${item.stop_id}</span>
+                                <span class="node-title">📍 ${item.address || '無地址資料'}</span>
+                                <span class="node-count-badge">${item.merged_count} 站</span>
                             </div>
-                            <div class="node-addr">📍 ${item.address || '無地址資料'}</div>
                         </div>
                     `;
                 }
