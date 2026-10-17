@@ -7,11 +7,14 @@
 4. 箭頭顏色狀態：預設全為 GREEN (綠色暢通)，預留 ORANGE / RED 介面
 """
 import math
+import bisect
 import requests
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+import tdx_client
 
 app = FastAPI(title="Logistics Route Optimizer API")
 
@@ -66,6 +69,162 @@ def classify_street(name: str, ref: str = "") -> str:
         return "STREET"
     # 優先級 4：大道路或預設幹道 (60 km/h)
     return "ARTERIAL"
+
+# ================= TDX 車輛偵測器 (VD) 覆蓋設定 =================
+EXTEND_M = 500.0                 # 沿路線往兩側延伸的上限 (公尺)
+COVERAGE_THRESHOLD_M = 50.0      # VD 離路線多近視為「在路徑上」(公尺)
+# 視為「轉彎 (含直角彎換路)」的 maneuver 類型
+TURN_MANEUVER_TYPES = {
+    "turn", "roundabout", "rotary", "merge", "fork",
+    "end of road", "on ramp", "off ramp", "ramp",
+}
+# 路名改變且伴隨明顯轉向時，亦視為轉彎
+TURN_NEW_NAME_MODIFIERS = {"left", "right", "sharp left", "sharp right", "uturn"}
+
+# 顏色（與前端左欄色票一致；橘/紅門檻保留待後續加入）
+VD_COLOR_HEX = {"GREEN": "#16a34a", "ORANGE": "#ea580c", "RED": "#dc2626", "GRAY": "#94a3b8"}
+
+
+def is_turn_step(step: Dict[str, Any]) -> bool:
+    """判斷 OSRM step 的進入動作是否屬於「轉彎」。"""
+    maneuver = step.get("maneuver") or {}
+    mtype = str(maneuver.get("type", "")).lower()
+    modifier = str(maneuver.get("modifier", "")).lower()
+    if mtype in TURN_MANEUVER_TYPES:
+        return True
+    if mtype == "new name" and modifier in TURN_NEW_NAME_MODIFIERS:
+        return True
+    return False
+
+
+def classify_vd_color(speed: Optional[float]) -> str:
+    """Phase 1：有即時速度 (>0) 為綠、無資料為灰（橘/紅門檻待後續加入）。"""
+    if speed is not None and speed > 0:
+        return "GREEN"
+    return "GRAY"
+
+
+def _project_point_to_path(pt_lat: float, pt_lon: float,
+                           path: List[List[float]], cum: List[float]) -> Tuple[float, float]:
+    """將點投影到折線上，回傳 (最近水平距離 m, 沿線累積里程 m)。"""
+    lat0 = math.radians(pt_lat)
+    mx = 111320.0 * math.cos(lat0)
+    my = 110540.0
+    px = pt_lon * mx
+    py = pt_lat * my
+    best_off = float("inf")
+    best_s = 0.0
+    for i in range(len(path) - 1):
+        ax = path[i][1] * mx; ay = path[i][0] * my
+        bx = path[i + 1][1] * mx; by = path[i + 1][0] * my
+        dx = bx - ax; dy = by - ay
+        seg2 = dx * dx + dy * dy
+        t = 0.0 if seg2 <= 0 else ((px - ax) * dx + (py - ay) * dy) / seg2
+        t = max(0.0, min(1.0, t))
+        cx = ax + dx * t; cy = ay + dy * t
+        off = math.hypot(px - cx, py - cy)
+        if off < best_off:
+            best_off = off
+            best_s = cum[i] + (cum[i + 1] - cum[i]) * t
+    return best_off, best_s
+
+
+def _path_point_at(path: List[List[float]], cum: List[float], d: float) -> List[float]:
+    total = cum[-1]
+    if d <= 0:
+        return [path[0][0], path[0][1]]
+    if d >= total:
+        return [path[-1][0], path[-1][1]]
+    i = bisect.bisect_right(cum, d) - 1
+    i = max(0, min(i, len(path) - 2))
+    seg = cum[i + 1] - cum[i]
+    t = 0.0 if seg <= 0 else (d - cum[i]) / seg
+    lat = path[i][0] + (path[i + 1][0] - path[i][0]) * t
+    lng = path[i][1] + (path[i + 1][1] - path[i][1]) * t
+    return [lat, lng]
+
+
+def _slice_path(path: List[List[float]], cum: List[float], d0: float, d1: float) -> List[List[float]]:
+    """取出折線由里程 d0 到 d1 的子折線。"""
+    if not path or len(path) < 2 or not cum:
+        return []
+    d0 = max(0.0, d0)
+    d1 = min(cum[-1], d1)
+    if d1 <= d0:
+        return []
+    out = [_path_point_at(path, cum, d0)]
+    for i in range(len(path)):
+        if d0 < cum[i] < d1:
+            out.append([path[i][0], path[i][1]])
+    out.append(_path_point_at(path, cum, d1))
+    return out
+
+
+def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """比對 VD 與路線，產生標記點與「±500m、遇轉彎截斷」的覆蓋子折線。"""
+    path = profile.get("path") or []
+    cum = profile.get("cum") or []
+    turns = profile.get("turn_boundaries") or []
+    leg_bounds = profile.get("leg_boundaries") or []
+    points: List[Dict[str, Any]] = []
+    coverage: List[Dict[str, Any]] = []
+    if len(path) < 2 or not cities:
+        return points, coverage
+
+    live = tdx_client.live_map(cities)
+    seen: set = set()
+    for city in cities:
+        for vd in tdx_client.get_city_vds(city):
+            vdid = str(vd.get("VDID", ""))
+            lat = vd.get("PositionLat")
+            lon = vd.get("PositionLon")
+            if not vdid or lat is None or lon is None or vdid in seen:
+                continue
+            seen.add(vdid)
+
+            lat = float(lat); lon = float(lon)
+            off, s = _project_point_to_path(lat, lon, path, cum)
+            if off > COVERAGE_THRESHOLD_M:
+                continue
+
+            back_turn = max([t for t in turns if t <= s], default=0.0)
+            fwd_turn = min([t for t in turns if t >= s], default=cum[-1])
+            back_len = min(EXTEND_M, s - back_turn)
+            fwd_len = min(EXTEND_M, fwd_turn - s)
+            seg = _slice_path(path, cum, s - back_len, s + fwd_len)
+            if len(seg) < 2:
+                continue
+
+            leg_index = max(0, len(leg_bounds) - 1)
+            for i, b in enumerate(leg_bounds):
+                if s <= b:
+                    leg_index = i
+                    break
+
+            entry = live.get(vdid)
+            speed = entry.get("speed") if entry else None
+            color = classify_vd_color(speed)
+
+            points.append({
+                "vdid": vdid,
+                "lat": lat,
+                "lon": lon,
+                "road": vd.get("RoadName", ""),
+                "road_class": vd.get("RoadClass"),
+                "speed": speed,
+                "color": color,
+            })
+            coverage.append({
+                "vdid": vdid,
+                "leg_index": leg_index,
+                "path": seg,
+                "back_m": round(back_len, 1),
+                "fwd_m": round(fwd_len, 1),
+                "color": color,
+                "speed": speed,
+                "collect_time": entry.get("collect_time") if entry else None,
+            })
+    return points, coverage
 
 # ================= 資料模型 =================
 class DepotItem(BaseModel):
@@ -216,7 +375,8 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             "geometry": [],
             "total_distance_km": 0,
             "total_duration_min": 0,
-            "legs": []
+            "legs": [],
+            "profile": {"path": [], "cum": [], "turn_boundaries": [], "leg_boundaries": []}
         }
 
     # OSRM Route 支援最多約 80~100 點，開啟 steps=true 以獲取街道名稱與各步細節
@@ -230,10 +390,24 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             if data.get("routes"):
                 route_info = data["routes"][0]
                 latlng_path = [[pt[1], pt[0]] for pt in route_info["geometry"]["coordinates"]]
-                
+
                 legs_result = []
                 total_adjusted_duration_s = 0.0
                 total_distance_m = 0.0
+
+                # 路線剖面：沿線座標 + 累積里程 + 轉彎/分段邊界（供 VD 覆蓋段計算）
+                prof_path: List[List[float]] = []
+                prof_cum: List[float] = [0.0]
+                turn_boundaries: List[float] = []
+                leg_boundaries: List[float] = []
+
+                def _append_prof(lat: float, lng: float):
+                    if prof_path:
+                        prev = prof_path[-1]
+                        if abs(prev[0] - lat) < 1e-9 and abs(prev[1] - lng) < 1e-9:
+                            return
+                        prof_cum.append(prof_cum[-1] + haversine_distance_meters(prev[0], prev[1], lat, lng))
+                    prof_path.append([lat, lng])
 
                 for leg_idx, leg in enumerate(route_info.get("legs", [])):
                     leg_dist_m = 0.0
@@ -245,9 +419,17 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
                         s_dur = step.get("duration", 0.0)
                         st_name = step.get("name", "")
                         st_ref = step.get("ref", "")
-                        
+
                         if st_name and st_name not in street_names:
                             street_names.append(st_name)
+
+                        # 進入此 step 若為轉彎，記錄轉彎邊界（累積里程）
+                        if prof_path and is_turn_step(step):
+                            turn_boundaries.append(prof_cum[-1])
+
+                        # 累積此 step 的幾何點
+                        for pt in (step.get("geometry") or {}).get("coordinates", []):
+                            _append_prof(pt[1], pt[0])
 
                         # 判定道路類型並取得速限上限 (大道路為 60 km/h)
                         rtype = classify_street(st_name, st_ref)
@@ -264,8 +446,9 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
 
                     total_distance_m += leg_dist_m
                     total_adjusted_duration_s += leg_dur_s
+                    leg_boundaries.append(prof_cum[-1] if len(prof_path) >= 2 else total_distance_m)
 
-                    # 箭頭顏色暫時只會用到綠色 (GREEN)
+                    # 箭頭顏色預設綠色 (GREEN)，之後可依 TDX 即時車流更新
                     legs_result.append({
                         "leg_index": leg_idx,
                         "from_seq": leg_idx,
@@ -273,14 +456,31 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
                         "distance_km": round(leg_dist_m / 1000.0, 2),
                         "duration_min": round(leg_dur_s / 60.0, 1),
                         "main_street": " → ".join(street_names[:3]) if street_names else "一般街道",
-                        "traffic_status": "GREEN"  # 依需求：現階段固定為綠色
+                        "traffic_status": "GREEN"
                     })
+
+                # 若 step 幾何缺失，改用路線整體幾何建立剖面
+                if len(prof_path) < 2:
+                    fb_path = latlng_path if len(latlng_path) >= 2 else [[p[1], p[0]] for p in ordered_coords]
+                    fb_cum = [0.0]
+                    for i in range(1, len(fb_path)):
+                        a, b = fb_path[i - 1], fb_path[i]
+                        fb_cum.append(fb_cum[-1] + haversine_distance_meters(a[0], a[1], b[0], b[1]))
+                    prof_path, prof_cum = fb_path, fb_cum
+                    turn_boundaries = []
+                    leg_boundaries = [prof_cum[-1]]
 
                 return {
                     "geometry": latlng_path,
                     "total_distance_km": round(total_distance_m / 1000.0, 2),
                     "total_duration_min": round(total_adjusted_duration_s / 60.0, 1),
-                    "legs": legs_result
+                    "legs": legs_result,
+                    "profile": {
+                        "path": prof_path,
+                        "cum": prof_cum,
+                        "turn_boundaries": turn_boundaries,
+                        "leg_boundaries": leg_boundaries,
+                    },
                 }
     except Exception as e:
         print(f"OSRM Route request error: {e}")
@@ -307,11 +507,22 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             "traffic_status": "GREEN"
         })
 
+    fb_cum = [0.0]
+    for i in range(1, len(fallback_path)):
+        a, b = fallback_path[i - 1], fallback_path[i]
+        fb_cum.append(fb_cum[-1] + haversine_distance_meters(a[0], a[1], b[0], b[1]))
+
     return {
         "geometry": fallback_path,
-        "total_distance_km": round(total_dist_m / 1000.0, 2),
+        "total_distance_km": round(total_distance_m / 1000.0, 2),
         "total_duration_min": round(total_dur_s / 60.0, 1),
-        "legs": legs_result
+        "legs": legs_result,
+        "profile": {
+            "path": fallback_path,
+            "cum": fb_cum,
+            "turn_boundaries": [],
+            "leg_boundaries": [fb_cum[-1]] if fb_cum else [],
+        },
     }
 
 # ================= 單行程最佳化端點 =================
@@ -327,7 +538,10 @@ def optimize_single_trip(payload: SingleTripRequest):
             "estimated_duration_min": 0,
             "sequence": [],
             "legs": [],
-            "polyline": []
+            "polyline": [],
+            "counties": [],
+            "vd_points": [],
+            "vd_coverage": []
         }
 
     # 1. 站點聚合合併 (地址相同或 <= 30m 歸於同一個點)
@@ -385,6 +599,14 @@ def optimize_single_trip(payload: SingleTripRequest):
     # 5. OSRM steps 解析道路類型車速與各 Leg 行車時間
     route_calc = compute_route_with_road_speed(ordered_coords)
 
+    # 6. TDX 車輛偵測器：由地址判定縣市 → 取 VD 標記點與覆蓋段
+    counties = tdx_client.detect_counties([s.address for s in payload.stops])
+    try:
+        vd_points, vd_coverage = compute_vd_overlay(route_calc.get("profile", {}), counties)
+    except Exception as exc:  # TDX 失敗不影響路線計算
+        print(f"[TDX] VD overlay 失敗: {exc}")
+        vd_points, vd_coverage = [], []
+
     return {
         "status": "success",
         "order_id": payload.order_id,
@@ -395,8 +617,21 @@ def optimize_single_trip(payload: SingleTripRequest):
         "estimated_duration_min": route_calc["total_duration_min"],
         "sequence": sequence_result,
         "legs": route_calc["legs"],
-        "polyline": route_calc["geometry"]
+        "polyline": route_calc["geometry"],
+        "counties": counties,
+        "vd_points": vd_points,
+        "vd_coverage": vd_coverage
     }
+
+
+@app.get("/api/traffic/live")
+def traffic_live(counties: str = ""):
+    """輪詢用：回傳指定縣市的 VD 即時速度（前端據此更新顏色）。"""
+    codes = [c.strip() for c in counties.split(",") if c.strip()]
+    data = tdx_client.live_map(codes)
+    for entry in data.values():
+        entry["color"] = classify_vd_color(entry.get("speed"))
+    return {"status": "success", "counties": codes, "vds": data}
 
 if __name__ == "__main__":
     import uvicorn
