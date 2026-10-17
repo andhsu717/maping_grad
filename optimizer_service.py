@@ -558,7 +558,8 @@ def optimize_single_trip(payload: SingleTripRequest):
             "polyline": [],
             "counties": [],
             "vd_points": [],
-            "vd_coverage": []
+            "vd_coverage": [],
+            "route_meta": {"cum": [], "turn_boundaries": [], "leg_boundaries": []}
         }
 
     # 1. 站點聚合合併 (地址相同或 <= 30m 歸於同一個點)
@@ -637,7 +638,12 @@ def optimize_single_trip(payload: SingleTripRequest):
         "polyline": route_calc["geometry"],
         "counties": counties,
         "vd_points": vd_points,
-        "vd_coverage": vd_coverage
+        "vd_coverage": vd_coverage,
+        "route_meta": {
+            "cum": route_calc["profile"]["cum"],
+            "turn_boundaries": route_calc["profile"]["turn_boundaries"],
+            "leg_boundaries": route_calc["profile"]["leg_boundaries"]
+        }
     }
 
 
@@ -647,6 +653,250 @@ def traffic_live(counties: str = ""):
     codes = [c.strip() for c in counties.split(",") if c.strip()]
     data = tdx_client.live_map(codes)
     return {"status": "success", "counties": codes, "vds": data}
+
+
+# ================= 改道備選路徑 (Phase 3) =================
+REROUTE_MIN_WINDOW_M = 200.0   # P1→P2 區間過短則不提改道
+REROUTE_MAX_LEGS = 2           # 每次最多處理的壅塞 leg 數
+REROUTE_ALT_MAX = 2            # 每條 leg 最多候選路徑數
+REROUTE_MIN_SAVED_MIN = 0.1    # 節省時間門檻（分）
+
+
+def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
+                          vds: List[Dict[str, Any]]) -> List[List[float]]:
+    """將 VD 投影到路徑，回傳合併後的覆蓋區間 [[a_m, b_m, speed_kmh], ...]。"""
+    intervals: List[List[float]] = []
+    total = cum[-1]
+    for vd in vds:
+        spd = vd.get("speed")
+        if spd is None or float(spd) <= 0:
+            continue
+        off, s = _project_point_to_path(float(vd["lat"]), float(vd["lon"]), path, cum)
+        if off > COVERAGE_THRESHOLD_M:
+            continue
+        a = max(0.0, s - EXTEND_M)
+        b = min(total, s + EXTEND_M)
+        if b > a:
+            intervals.append([a, b, min(float(spd), 90.0)])
+    intervals.sort(key=lambda x: x[0])
+    merged: List[List[float]] = []
+    for a, b, v in intervals:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+            merged[-1][2] = min(merged[-1][2], v)
+        else:
+            merged.append([a, b, v])
+    return merged
+
+
+def _duration_over(merged: List[List[float]], d0: float, d1: float,
+                   nom_speed_mps: float) -> float:
+    """里程 [d0,d1] 的行駛時間（秒）：基準速度 + VD 區間以實際速度替代。"""
+    if d1 <= d0 or nom_speed_mps <= 0:
+        return 0.0
+    total = 0.0
+    cursor = d0
+    for a, b, v in merged:
+        if b <= d0 or a >= d1:
+            continue
+        aa = max(a, d0)
+        bb = min(b, d1)
+        if aa > cursor:
+            total += (aa - cursor) / nom_speed_mps
+        vs = max(float(v) / 3.6, 0.5)
+        total += (bb - aa) / vs
+        cursor = bb
+    if cursor < d1:
+        total += (d1 - cursor) / nom_speed_mps
+    return total
+
+
+def _max_deviation_m(alt_path: List[List[float]], main_path: List[List[float]],
+                     main_cum: List[float]) -> Tuple[float, List[float], List[float]]:
+    """候選路徑相對主線的最大偏離距離，以及 (第一個偏離點, 最後一個偏離點)。"""
+    max_off = 0.0
+    exit_at: List[float] = []
+    rejoin_at: List[float] = []
+    step = max(1, len(alt_path) // 60)
+    for i in range(0, len(alt_path), step):
+        pt = alt_path[i]
+        off, _ = _project_point_to_path(pt[0], pt[1], main_path, main_cum)
+        if off > max_off:
+            max_off = off
+        if off > COVERAGE_THRESHOLD_M:
+            if not exit_at:
+                exit_at = pt
+            rejoin_at = pt
+    if not exit_at:
+        exit_at = alt_path[0]
+        rejoin_at = alt_path[-1]
+    return max_off, exit_at, rejoin_at
+
+
+class RouteAltVd(BaseModel):
+    vdid: str = ""
+    lat: float
+    lon: float
+    speed: Optional[float] = None
+
+
+class RouteAltLeg(BaseModel):
+    leg_index: int
+    distance_km: float = 0.0
+    duration_min: float = 0.0
+    base_duration_min: Optional[float] = None
+
+
+class RouteAlternativesRequest(BaseModel):
+    polyline: List[List[float]]
+    cum: List[float] = []
+    turn_boundaries: List[float] = []
+    leg_boundaries: List[float] = []
+    coverage: List[Dict[str, Any]] = []
+    vds: List[RouteAltVd] = []
+    counties: List[str] = []
+    legs: List[RouteAltLeg] = []
+
+
+@app.post("/api/route/alternatives")
+def route_alternatives(req: RouteAlternativesRequest):
+    """對壅塞 leg 推算提早改道點 (P1) 與回歸點 (P2)，回最多 2 條備用路徑與 ETA。"""
+    path = req.polyline or []
+    if len(path) < 2:
+        return {"status": "success", "legs": []}
+    cum = req.cum or []
+    if len(cum) != len(path):
+        cum = [0.0]
+        for i in range(1, len(path)):
+            cum.append(cum[-1] + haversine_distance_meters(
+                path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]))
+    total_m = cum[-1]
+    if total_m <= 0:
+        return {"status": "success", "legs": []}
+
+    turns = req.turn_boundaries or []
+    leg_bounds = req.leg_boundaries or []
+    vds = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in req.vds]
+    legs_info = {l.leg_index: (l.model_dump() if hasattr(l, "model_dump") else l.dict())
+                 for l in req.legs}
+
+    # 1) 依有效顏色合併每條 leg 的橘/紅壅塞區間
+    by_leg: Dict[int, Dict[str, Any]] = {}
+    for cov in req.coverage:
+        color = cov.get("color")
+        if color not in ("ORANGE", "RED"):
+            continue
+        li = cov.get("leg_index")
+        if li is None:
+            continue
+        try:
+            s = float(cov.get("s_m", 0.0))
+            a = s - float(cov.get("back_m", 0.0))
+            b = s + float(cov.get("fwd_m", 0.0))
+        except (TypeError, ValueError):
+            continue
+        li = int(li)
+        slot = by_leg.setdefault(li, {"a": a, "b": b, "worst": color})
+        slot["a"] = min(slot["a"], a)
+        slot["b"] = max(slot["b"], b)
+        if color == "RED":
+            slot["worst"] = "RED"
+
+    ranked = sorted(by_leg.items(),
+                    key=lambda kv: (-(kv[1]["worst"] == "RED"), -(kv[1]["b"] - kv[1]["a"])))
+    ranked = ranked[:REROUTE_MAX_LEGS]
+    if not ranked:
+        return {"status": "success", "legs": []}
+
+    merged_main = _vd_intervals_on_path(path, cum, vds)
+
+    out_legs: List[Dict[str, Any]] = []
+    for li, slot in ranked:
+        a, b = slot["a"], slot["b"]
+        # 2) P1 = 壅塞前最後一個轉彎路口；P2 = 壅塞後第一個轉彎路口（無緩衝）
+        p1 = max([t for t in turns if t <= a], default=0.0)
+        p2 = min([t for t in turns if t >= b], default=total_m)
+        if p2 - p1 < REROUTE_MIN_WINDOW_M:
+            continue
+        pt1 = _path_point_at(path, cum, p1)
+        pt2 = _path_point_at(path, cum, p2)
+
+        # 3) OSRM 取 P1→P2 備選
+        try:
+            url = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                   f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                   f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            routes = resp.json().get("routes", []) if resp.status_code == 200 else []
+        except Exception:
+            routes = []
+        if not routes:
+            continue
+
+        # 主線 leg 的名目速度與當前（含壅塞）總時間
+        leg_info = legs_info.get(li, {})
+        leg_start = leg_bounds[li - 1] if 0 < li < len(leg_bounds) else 0.0
+        leg_end = leg_bounds[li] if li < len(leg_bounds) else total_m
+        leg_base_min = float(leg_info.get("base_duration_min")
+                             or leg_info.get("duration_min") or 0.0)
+        leg_nom = ((leg_end - leg_start) / (leg_base_min * 60.0)) if leg_base_min > 0 else 15.0
+        main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
+        base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
+        main_total_s = sum(float(x.get("duration_min") or 0.0) * 60.0
+                           for x in legs_info.values())
+        if main_total_s <= 0:
+            main_total_s = total_m / max(leg_nom, 1.0)
+
+        alts: List[Dict[str, Any]] = []
+        for rt in routes[:REROUTE_ALT_MAX]:
+            alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
+            if len(alt_path) < 2:
+                continue
+            alt_cum = [0.0]
+            for i in range(1, len(alt_path)):
+                alt_cum.append(alt_cum[-1] + haversine_distance_meters(
+                    alt_path[i - 1][0], alt_path[i - 1][1], alt_path[i][0], alt_path[i][1]))
+            alt_total_m = alt_cum[-1]
+            if alt_total_m <= 0:
+                continue
+            # 幾何過濾：與主線偏離過小＝假備選
+            max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, path, cum)
+            if max_off <= COVERAGE_THRESHOLD_M:
+                continue
+            alt_osrm_s = float(rt.get("duration") or 0.0)
+            alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
+            merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
+            alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
+            cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
+            saved_min = (main_total_s - cand_total_s) / 60.0
+            if saved_min <= REROUTE_MIN_SAVED_MIN:
+                continue
+            alts.append({
+                "seg_polyline": alt_path,
+                "p1_m": round(p1, 1),
+                "p2_m": round(p2, 1),
+                "leg_start_m": round(leg_start, 1),
+                "leg_end_m": round(leg_end, 1),
+                "base_p1p2_min": round(base_p1p2_s / 60.0, 1),
+                "alt_p1p2_min": round(alt_p1p2_s / 60.0, 1),
+                "eta_min": round(cand_total_s / 60.0, 1),
+                "saved_min": round(saved_min, 1),
+                "distance_km": round(alt_total_m / 1000.0, 2),
+                "exit_at": exit_at,
+                "rejoin_at": rejoin_at
+            })
+
+        if alts:
+            out_legs.append({
+                "leg_index": li,
+                "a_m": round(a, 1),
+                "b_m": round(b, 1),
+                "current_eta_min": round(main_total_s / 60.0, 1),
+                "alternatives": alts
+            })
+
+    return {"status": "success", "legs": out_legs}
+
 
 if __name__ == "__main__":
     import uvicorn

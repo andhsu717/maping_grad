@@ -501,6 +501,13 @@
         .vd-sim-btn { font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; color: #334155; cursor: pointer; }
         .vd-sim-btn:hover { background: #e2e8f0; }
         .vd-sim-btn.active { background: #f59e0b; color: #ffffff; border-color: #f59e0b; }
+        .vd-toggle-panel #vd-clear-reroute-btn { margin-top: 6px; width: 100%; font-size: 11px; padding: 3px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f1f5f9; color: #334155; cursor: pointer; }
+        .vd-toggle-panel #vd-clear-reroute-btn:hover { background: #e2e8f0; }
+        .reroute-panel { margin: 4px 0 8px 28px; padding: 6px 8px; background: #f5f3ff; border: 1px solid #c4b5fd; border-radius: 6px; font-size: 11px; color: #5b21b6; }
+        .reroute-title { font-weight: 700; margin-bottom: 4px; }
+        .reroute-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
+        .reroute-apply-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #7c3aed; border-radius: 4px; background: #7c3aed; color: #ffffff; cursor: pointer; }
+        .reroute-apply-btn:hover { background: #6d28d9; }
 
         /* 地圖區域 */
         #map { flex: 1; height: 100%; position: relative; }
@@ -633,7 +640,8 @@
         vdToggleControl.onAdd = function () {
             const div = L.DomUtil.create('div', 'vd-toggle-panel');
             div.innerHTML = '<label><input type="checkbox" id="vd-toggle-uncovered"' + (showUncoveredVd ? ' checked' : '') + ' /> 顯示未覆蓋 VD</label>'
-                + '<button type="button" id="vd-clear-sim-btn">清除模擬</button>';
+                + '<button type="button" id="vd-clear-sim-btn">清除模擬</button>'
+                + '<button type="button" id="vd-clear-reroute-btn">清除改道</button>';
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
             return div;
@@ -651,6 +659,14 @@
             if (t.id === 'vd-clear-sim-btn') {
                 Object.keys(vdManualOverride).forEach(k => delete vdManualOverride[k]);
                 rerenderVdAndEta();
+                return;
+            }
+            if (t.id === 'vd-clear-reroute-btn') {
+                clearAllReroutes();
+                return;
+            }
+            if (t.classList && t.classList.contains('reroute-apply-btn')) {
+                applyReroute(t.getAttribute('data-trip'), parseInt(t.getAttribute('data-leg'), 10), parseInt(t.getAttribute('data-alt'), 10));
                 return;
             }
             const lvAttr = t.getAttribute('data-lv');
@@ -1047,6 +1063,10 @@
                 trip.is_computed = false;
                 trip.route_result = null;
                 trip.vd_result = null;
+                trip.route_meta = null;
+                trip.originalRoute = null;
+                trip.appliedReroutes = {};
+                trip.rerouteOptions = [];
             });
             renderSidebar();
             renderAllMapLayers();
@@ -1158,6 +1178,7 @@
             const byLeg = {};
             coverage.forEach(cov => {
                 if (cov.leg_index == null || cov.s_m == null) return;
+                if (trip.appliedReroutes && trip.appliedReroutes[cov.leg_index]) return; // 已改道 leg 不套用原路壅塞融合
                 const slot = byLeg[cov.leg_index] = byLeg[cov.leg_index] || { intervals: [], worst: 'GRAY' };
                 const eff = effectiveVd(cov.vdid);
                 if (!eff.speed || eff.speed <= 0) return;
@@ -1204,6 +1225,165 @@
             renderTimelineView();
         }
 
+        /* ========== 改道系統：掃描/繪製/套用/清除 ========== */
+        const rerouteScanTimers = {};
+
+        function pathPointAt(path, cum, d) {
+            if (!path || path.length < 2 || !cum || cum.length !== path.length) return null;
+            const total = cum[cum.length - 1];
+            d = Math.max(0, Math.min(total, d));
+            let lo = 0, hi = cum.length - 1;
+            while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (cum[mid] <= d) lo = mid; else hi = mid - 1; }
+            const i = Math.min(lo, path.length - 2);
+            const seg = cum[i + 1] - cum[i];
+            const t = seg <= 0 ? 0 : (d - cum[i]) / seg;
+            return [path[i][0] + (path[i + 1][0] - path[i][0]) * t, path[i][1] + (path[i + 1][1] - path[i][1]) * t];
+        }
+
+        function slicePathByMileage(path, cum, d0, d1) {
+            if (!path || path.length < 2 || !cum || cum.length !== path.length) return [];
+            d0 = Math.max(0, d0);
+            d1 = Math.min(cum[cum.length - 1], d1);
+            if (d1 <= d0) return [];
+            const out = [pathPointAt(path, cum, d0)];
+            for (let i = 0; i < path.length; i++) {
+                if (cum[i] > d0 && cum[i] < d1) out.push(path[i]);
+            }
+            out.push(pathPointAt(path, cum, d1));
+            return out.filter(Boolean);
+        }
+
+        function rebuildPolylineWithReroutes(trip) {
+            const orig = trip.originalRoute;
+            if (!orig || !orig.polyline || !orig.cum || !orig.cum.length) return null;
+            const applied = Object.keys(trip.appliedReroutes || {}).map(k => trip.appliedReroutes[k]).sort((a, b) => a.p1_m - b.p1_m);
+            if (!applied.length) return null;
+            let path = [];
+            let cursor = 0;
+            const total = orig.cum[orig.cum.length - 1];
+            applied.forEach(ap => {
+                path = path.concat(slicePathByMileage(orig.polyline, orig.cum, cursor, ap.p1_m));
+                path = path.concat(ap.alt.seg_polyline || []);
+                cursor = ap.p2_m;
+            });
+            path = path.concat(slicePathByMileage(orig.polyline, orig.cum, cursor, total));
+            return path.length > 1 ? path : null;
+        }
+
+        function scheduleRerouteScan(trip) {
+            if (!trip || !trip.is_computed || !trip.route_result || !trip.route_meta) return;
+            clearTimeout(rerouteScanTimers[trip.trip_key]);
+            rerouteScanTimers[trip.trip_key] = setTimeout(() => { scanReroutesForTrip(trip); }, 500);
+        }
+
+        async function scanReroutesForTrip(trip) {
+            if (!trip.is_computed || !trip.route_result || !trip.route_meta) return;
+            const meta = trip.route_meta;
+            if (!meta.cum || meta.cum.length < 2) return;
+            buildVdPointIndex();
+            const vds = [];
+            const seen = new Set();
+            (trip.vd_result.coverage || []).forEach(cov => {
+                if (seen.has(cov.vdid)) return;
+                seen.add(cov.vdid);
+                const p = vdPointIndex[cov.vdid];
+                const eff = effectiveVd(cov.vdid);
+                if (!p || p.lat == null || p.lon == null) return;
+                vds.push({ vdid: cov.vdid, lat: p.lat, lon: p.lon, speed: eff.speed || 0 });
+            });
+            const coverage = [];
+            (trip.vd_result.coverage || []).forEach(cov => {
+                if (trip.appliedReroutes && trip.appliedReroutes[cov.leg_index]) return;
+                const eff = effectiveVd(cov.vdid);
+                coverage.push({ vdid: cov.vdid, s_m: cov.s_m, back_m: cov.back_m, fwd_m: cov.fwd_m, leg_index: cov.leg_index, color: eff.color });
+            });
+            const legs = (trip.route_result.legs || []).map((l, i) => ({
+                leg_index: i,
+                distance_km: l.distance_km || 0,
+                duration_min: l.duration_min || 0,
+                base_duration_min: (l.base_duration_min != null) ? l.base_duration_min : l.duration_min
+            }));
+            try {
+                const resp = await fetch('http://127.0.0.1:8000/api/route/alternatives', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        polyline: (trip.originalRoute && trip.originalRoute.polyline) ? trip.originalRoute.polyline : trip.route_result.polyline,
+                        cum: meta.cum,
+                        turn_boundaries: meta.turn_boundaries || [],
+                        leg_boundaries: meta.leg_boundaries || [],
+                        coverage: coverage,
+                        vds: vds,
+                        counties: (trip.vd_result && trip.vd_result.counties) || [],
+                        legs: legs
+                    })
+                });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                trip.rerouteOptions = (data.legs || []).filter(x => !(trip.appliedReroutes && trip.appliedReroutes[x.leg_index]));
+                renderAllMapLayers();
+                renderTimelineView();
+            } catch (err) {
+                console.error('改道查詢失敗:', err);
+            }
+        }
+
+        function applyReroute(tripKey, legIndex, altIndex) {
+            const trip = tripStore[tripKey];
+            if (!trip || !trip.route_result || !trip.rerouteOptions) return;
+            const item = trip.rerouteOptions.find(x => x.leg_index === legIndex);
+            if (!item) return;
+            const alt = (item.alternatives || [])[altIndex];
+            if (!alt || !alt.seg_polyline) return;
+            if (!trip.originalRoute) {
+                trip.originalRoute = {
+                    polyline: JSON.parse(JSON.stringify(trip.route_result.polyline || [])),
+                    cum: (trip.route_meta && trip.route_meta.cum) ? trip.route_meta.cum.slice() : [],
+                    legs: JSON.parse(JSON.stringify(trip.route_result.legs || []))
+                };
+            }
+            trip.appliedReroutes = trip.appliedReroutes || {};
+            trip.appliedReroutes[legIndex] = { alt_index: altIndex, alt: alt, p1_m: alt.p1_m, p2_m: alt.p2_m };
+            const newPath = rebuildPolylineWithReroutes(trip);
+            if (newPath) trip.route_result.polyline = newPath;
+            const leg = (trip.route_result.legs || [])[legIndex];
+            const origLeg = (trip.originalRoute.legs || [])[legIndex];
+            if (leg && origLeg) {
+                const origBase = (origLeg.base_duration_min != null) ? origLeg.base_duration_min : origLeg.duration_min;
+                leg.base_duration_min = Math.max(0.1, Math.round((origBase - (alt.base_p1p2_min || 0) + (alt.alt_p1p2_min || 0)) * 10) / 10);
+                leg.base_traffic_status = 'GREEN';
+            }
+            applyVdEta(trip);
+            trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => x.leg_index !== legIndex);
+            renderSidebar();
+            renderAllMapLayers();
+            renderTimelineView();
+            scheduleRerouteScan(trip);
+        }
+
+        function clearAllReroutes() {
+            let any = false;
+            Object.values(tripStore).forEach(trip => {
+                if (!trip.originalRoute || !trip.appliedReroutes || !Object.keys(trip.appliedReroutes).length) return;
+                any = true;
+                trip.route_result.polyline = JSON.parse(JSON.stringify(trip.originalRoute.polyline));
+                (trip.originalRoute.legs || []).forEach((ol, i) => {
+                    const leg = (trip.route_result.legs || [])[i];
+                    if (leg) {
+                        leg.base_duration_min = ol.base_duration_min;
+                        leg.base_traffic_status = ol.base_traffic_status;
+                    }
+                });
+                trip.appliedReroutes = {};
+                applyVdEta(trip);
+            });
+            if (!any) return;
+            renderSidebar();
+            renderAllMapLayers();
+            renderTimelineView();
+            Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) scheduleRerouteScan(t); });
+        }
+
         function renderAllMapLayers() {
             Object.keys(tripLayerGroups).forEach(id => {
                 map.removeLayer(tripLayerGroups[id]);
@@ -1222,6 +1402,26 @@
                     if (trip.route_result.polyline && trip.route_result.polyline.length > 0) {
                         L.polyline(trip.route_result.polyline, { color: trip.color, weight: 5, opacity: 0.8 }).addTo(layerGroup);
                     }
+
+                    // 改道備選路徑（虛線）與 ETA 標示
+                    (trip.rerouteOptions || []).forEach(item => {
+                        (item.alternatives || []).forEach((alt, ai) => {
+                            if (!alt.seg_polyline || alt.seg_polyline.length < 2) return;
+                            const altColor = ai === 0 ? '#7c3aed' : '#2563eb';
+                            L.polyline(alt.seg_polyline, {
+                                color: altColor, weight: 4, opacity: 0.85, dashArray: '8,6'
+                            }).addTo(layerGroup)
+                                .bindTooltip(`改道建議 (Leg ${item.leg_index + 1} 備選${ai + 1})：目前 ${item.current_eta_min} 分 ｜ 備選 ${alt.eta_min} 分 ｜ 省 ${alt.saved_min} 分`, { sticky: true });
+                            if (alt.exit_at) {
+                                L.circleMarker(alt.exit_at, { radius: 6, color: altColor, fillColor: '#ffffff', fillOpacity: 1, weight: 2 })
+                                    .bindTooltip('建議提早改道點').addTo(layerGroup);
+                            }
+                            if (alt.rejoin_at) {
+                                L.circleMarker(alt.rejoin_at, { radius: 6, color: altColor, fillColor: altColor, fillOpacity: 0.5, weight: 2 })
+                                    .bindTooltip('建議回歸點').addTo(layerGroup);
+                            }
+                        });
+                    });
                     if (trip.route_result.sequence) {
                         trip.route_result.sequence.forEach(seqStop => {
                             if (seqStop.type === 'DEPOT') return;
@@ -1463,6 +1663,26 @@
                         <div class="timeline-arrow-head"></div>
                     `;
                     flowContainer.appendChild(arrowEl);
+
+                    // 改道比較面板
+                    const rrItem = (trip.rerouteOptions || []).find(x => x.leg_index === index);
+                    if (rrItem && rrItem.alternatives && rrItem.alternatives.length) {
+                        const rrPanel = document.createElement('div');
+                        rrPanel.className = 'reroute-panel';
+                        let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}）</div>`;
+                        rrItem.alternatives.forEach((alt, ai) => {
+                            rrHtml += `<div class="reroute-row"><span>目前 ${rrItem.current_eta_min} 分 ｜ 備選${ai + 1}: ${alt.eta_min} 分（省 ${alt.saved_min} 分）</span>`
+                                + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-leg="${index}" data-alt="${ai}">套用</button></div>`;
+                        });
+                        rrPanel.innerHTML = rrHtml;
+                        flowContainer.appendChild(rrPanel);
+                    }
+                    if (trip.appliedReroutes && trip.appliedReroutes[index]) {
+                        const donePanel = document.createElement('div');
+                        donePanel.className = 'reroute-panel';
+                        donePanel.innerHTML = `<div class="reroute-title">已套用改道（Leg ${index + 1}，省 ${trip.appliedReroutes[index].alt.saved_min} 分）</div>`;
+                        flowContainer.appendChild(donePanel);
+                    }
                 }
             });
         }
@@ -1520,8 +1740,13 @@
                                 points: result.vd_points,
                                 coverage: result.vd_coverage
                             };
+                            trip.route_meta = result.route_meta || null;
+                            trip.originalRoute = null;
+                            trip.appliedReroutes = {};
+                            trip.rerouteOptions = [];
                             trip.is_computed = true;
                             applyVdEta(trip);
+                            scheduleRerouteScan(trip);
                         }
                     } catch (err) { 
                         console.error(`車次 ${trip.trip_key} 計算失敗:`, err); 
@@ -1588,6 +1813,7 @@
                     }
                 });
                 applyVdEta(trip);
+                if (trip.is_computed && trip.route_result) scheduleRerouteScan(trip);
             });
 
             renderAllMapLayers();
