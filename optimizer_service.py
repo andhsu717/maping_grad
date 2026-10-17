@@ -81,7 +81,7 @@ TURN_MANEUVER_TYPES = {
 # 路名改變且伴隨明顯轉向時，亦視為轉彎
 TURN_NEW_NAME_MODIFIERS = {"left", "right", "sharp left", "sharp right", "uturn"}
 
-# 顏色（與前端左欄色票一致；橘/紅門檻保留待後續加入）
+# 顏色（與前端左欄色票一致）
 VD_COLOR_HEX = {"GREEN": "#16a34a", "ORANGE": "#ea580c", "RED": "#dc2626", "GRAY": "#94a3b8"}
 
 
@@ -98,7 +98,7 @@ def is_turn_step(step: Dict[str, Any]) -> bool:
 
 
 def classify_vd_color(speed: Optional[float]) -> str:
-    """Phase 1：有即時速度 (>0) 為綠、無資料為灰（橘/紅門檻待後續加入）。"""
+    """（保留相容）僅以速度判斷綠/灰；實際顏色由 tdx_client 依官方門檻提供。"""
     if speed is not None and speed > 0:
         return "GREEN"
     return "GRAY"
@@ -189,7 +189,10 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
             if entry is not None and entry.get("status") != 0:
                 continue
             speed = entry.get("speed") if entry else None
-            color = classify_vd_color(speed)
+            color = entry.get("color") if entry else "GRAY"
+            level = entry.get("level") if entry else None
+            level_label = entry.get("level_name") if entry else ""
+            levels = entry.get("levels") if entry else None
             on_route = off <= COVERAGE_THRESHOLD_M
 
             points.append({
@@ -200,6 +203,9 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
                 "road_class": vd.get("RoadClass"),
                 "speed": speed,
                 "color": color,
+                "level": level,
+                "level_name": level_label,
+                "levels": levels,
                 "status": entry.get("status") if entry else None,
                 "collect_time": entry.get("collect_time") if entry else None,
                 "on_route": on_route,
@@ -225,10 +231,13 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
             coverage.append({
                 "vdid": vdid,
                 "leg_index": leg_index,
+                "s_m": round(s, 1),
                 "path": seg,
                 "back_m": round(back_len, 1),
                 "fwd_m": round(fwd_len, 1),
                 "color": color,
+                "level": level,
+                "levels": levels,
                 "speed": speed,
                 "collect_time": entry.get("collect_time") if entry else None,
             })
@@ -634,11 +643,9 @@ def optimize_single_trip(payload: SingleTripRequest):
 
 @app.get("/api/traffic/live")
 def traffic_live(counties: str = ""):
-    """輪詢用：回傳指定縣市的 VD 即時速度（前端據此更新顏色）。"""
+    """輪詢用：回傳指定縣市的 VD 即時速度與官方壅塞等級（前端據此更新顏色）。"""
     codes = [c.strip() for c in counties.split(",") if c.strip()]
     data = tdx_client.live_map(codes)
-    for entry in data.values():
-        entry["color"] = classify_vd_color(entry.get("speed"))
     return {"status": "success", "counties": codes, "vds": data}
 
 if __name__ == "__main__":

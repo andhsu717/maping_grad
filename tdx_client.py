@@ -42,10 +42,16 @@ CITY_CODE_MAP: Dict[str, str] = {
 _TOKEN_CACHE: Dict[str, Any] = {"token": None, "exp": 0.0}
 _STATIC_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_CACHE: Dict[str, Dict[str, Any]] = {}
+_LEVEL_CACHE: Dict[str, Dict[str, Any]] = {}
+_SECTION_CACHE: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.Lock()
 
 STATIC_TTL_SEC = 24 * 3600
 LIVE_TTL_SEC = 60
+CONGESTION_TTL_SEC = 6 * 3600
+
+# 公路局 fallback 門檻（無官方逐路段定義時使用，單位 km/h）
+FALLBACK_LEVEL_SPEED = [(40.0, 1), (20.0, 3), (0.0, 5)]
 
 
 def _load_credentials() -> Tuple[Optional[str], Optional[str]]:
@@ -183,17 +189,141 @@ def extract_speed(vd_live: Dict[str, Any]) -> float:
     return round(sum(speeds) / len(speeds), 1)
 
 
+def get_congestion_levels(city: str) -> Dict[str, List[Dict[str, Any]]]:
+    """官方路況壅塞水準定義：{CongestionLevelID: [Level 定義...]}（長快取）。"""
+    now = time.time()
+    cached = _LEVEL_CACHE.get(city)
+    if cached and now < cached["ts"] + CONGESTION_TTL_SEC:
+        return cached["data"]
+    data = _get(f"/CongestionLevel/City/{city}")
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    groups = data.get("CongestionLevels", []) if isinstance(data, dict) else []
+    for item in groups:
+        clid = item.get("CongestionLevelID")
+        if clid:
+            out[clid] = item.get("Levels") or []
+    _LEVEL_CACHE[city] = {"ts": now, "data": out}
+    return out
+
+
+def get_city_sections(city: str, use_cache: bool = True) -> List[Dict[str, Any]]:
+    """即時路段（含 LinkIDs 與 CongestionLevelID），短快取。"""
+    now = time.time()
+    cached = _SECTION_CACHE.get(city)
+    if use_cache and cached and now < cached["ts"] + LIVE_TTL_SEC:
+        return cached["data"]
+    data = _get(f"/Live/City/{city}")
+    secs = data.get("LiveTraffics", []) if isinstance(data, dict) else []
+    _SECTION_CACHE[city] = {"ts": now, "data": secs}
+    return secs
+
+
+def get_link_to_clid(city: str) -> Dict[str, Any]:
+    """{LinkID: CongestionLevelID}（由即時路段建立，補足無法直接命中的 VD）。"""
+    mapping: Dict[str, Any] = {}
+    for section in get_city_sections(city):
+        clid = section.get("CongestionLevelID")
+        for link in (section.get("LinkIDs") or []):
+            lid = link.get("LinkID") if isinstance(link, dict) else link
+            if lid:
+                mapping[lid] = clid
+    return mapping
+
+
+def _vd_links(vd: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for dl in (vd.get("DetectionLinks") or []):
+        lid = dl.get("LinkID")
+        if lid:
+            out.append(lid)
+    return out
+
+
+def _resolve_levels(vd: Dict[str, Any], by_clid: Dict[str, List[Dict[str, Any]]],
+                    link2clid: Optional[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    clid = None
+    for lid in _vd_links(vd):
+        if lid in by_clid:
+            clid = lid
+            break
+    if clid is None and link2clid:
+        for lid in _vd_links(vd):
+            if lid in link2clid:
+                clid = link2clid[lid]
+                break
+    return by_clid.get(clid) if clid else None
+
+
+def classify_congestion(speed: Optional[float], levels: Optional[List[Dict[str, Any]]]) -> Optional[int]:
+    """依官方逐路段門檻回傳壅塞等級 1~5；無門檻時用公路局 40/20 fallback。無速度回 None。"""
+    if speed is None or speed <= 0:
+        return None
+    if levels:
+        for lv in levels:
+            lo = lv.get("LowValue")
+            lo = float(lo) if isinstance(lo, (int, float)) else 0.0
+            top = lv.get("TopValue")
+            if speed > lo and (top is None or speed <= float(top)):
+                lv_num = lv.get("Level")
+                if isinstance(lv_num, (int, float)):
+                    return int(lv_num)
+        return None
+    for threshold, level in FALLBACK_LEVEL_SPEED:
+        if speed > threshold:
+            return level
+    return None
+
+
+def level_color(level: Optional[int]) -> str:
+    """A/B -> 綠、C/D -> 橘、E -> 紅、未知 -> 灰。"""
+    if level in (1, 2):
+        return "GREEN"
+    if level in (3, 4):
+        return "ORANGE"
+    if level == 5:
+        return "RED"
+    return "GRAY"
+
+
+def level_name(levels: Optional[List[Dict[str, Any]]], level: Optional[int]) -> str:
+    if levels and level is not None:
+        for lv in levels:
+            try:
+                if int(lv.get("Level", -1)) == level:
+                    return str(lv.get("LevelName") or "")
+            except (TypeError, ValueError):
+                continue
+    return ""
+
+
 def live_map(cities: List[str]) -> Dict[str, Dict[str, Any]]:
-    """回傳 {VDID: {speed, status, collect_time}}。"""
+    """回傳 {VDID: {speed, status, collect_time, level, level_name, color, levels}}。"""
     result: Dict[str, Dict[str, Any]] = {}
     for city in cities:
+        by_clid = get_congestion_levels(city)
+        link2clid: Optional[Dict[str, Any]] = None
+        levels_by_vdid: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+        for vd in get_city_vds(city):
+            vdid = str(vd.get("VDID", ""))
+            if not vdid:
+                continue
+            if link2clid is None and not any(lid in by_clid for lid in _vd_links(vd)):
+                link2clid = get_link_to_clid(city)
+            levels_by_vdid[vdid] = _resolve_levels(vd, by_clid, link2clid)
         for entry in get_city_vd_live(city):
             vdid = str(entry.get("VDID", ""))
             if not vdid:
                 continue
+            speed = extract_speed(entry)
+            levels = levels_by_vdid.get(vdid)
+            level = classify_congestion(speed, levels)
             result[vdid] = {
-                "speed": extract_speed(entry),
+                "speed": speed,
                 "status": entry.get("Status"),
                 "collect_time": entry.get("DataCollectTime"),
+                "level": level,
+                "level_name": level_name(levels, level),
+                "color": level_color(level),
+                "levels": levels,
             }
     return result

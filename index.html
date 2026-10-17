@@ -487,8 +487,20 @@
         .vd-warn-icon.on-route .vd-warn-box {
             box-shadow: 0 0 0 2px #f59e0b, 0 0 0 4px rgba(245, 158, 11, 0.35);
         }
+        .vd-warn-icon.on-route .vd-warn-box {
+            box-shadow: 0 0 0 2px #f59e0b, 0 0 0 4px rgba(245, 158, 11, 0.35);
+        }
+        .vd-warn-icon.sim .vd-warn-box {
+            box-shadow: 0 0 0 2px #7c3aed, 0 0 0 4px rgba(124, 58, 237, 0.35);
+        }
         .vd-toggle-panel { background: #ffffff; padding: 6px 10px; border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.3); font-size: 12px; color: #334155; }
         .vd-toggle-panel label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+        .vd-toggle-panel #vd-clear-sim-btn { margin-top: 6px; width: 100%; font-size: 11px; padding: 3px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f1f5f9; color: #334155; cursor: pointer; }
+        .vd-toggle-panel #vd-clear-sim-btn:hover { background: #e2e8f0; }
+        .vd-sim-row { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+        .vd-sim-btn { font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; color: #334155; cursor: pointer; }
+        .vd-sim-btn:hover { background: #e2e8f0; }
+        .vd-sim-btn.active { background: #f59e0b; color: #ffffff; border-color: #f59e0b; }
 
         /* 地圖區域 */
         #map { flex: 1; height: 100%; position: relative; }
@@ -594,6 +606,10 @@
         const VD_COLORS = { GREEN: '#16a34a', ORANGE: '#ea580c', RED: '#dc2626', GRAY: '#94a3b8' };
         const VD_WARN_COLOR = '#f59e0b';
         const LIVE_POLL_MS = 30 * 60 * 1000; // 每 30 分鐘更新即時車流
+        // 官方壅塞等級 1(A)~5(E) 代表速度（無門檻時使用，km/h）
+        const VD_LEVEL_FALLBACK_SPEED = { 1: 45, 2: 37, 3: 30, 4: 23, 5: 10 };
+        const VD_LEVEL_LABEL = { 1: 'A 順暢', 2: 'B 車多', 3: 'C 壅塞', 4: 'D 嚴重壅塞', 5: 'E 極度壅塞' };
+        const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
 
         let depotStore = []; 
         let tripStore = {};  
@@ -601,6 +617,8 @@
         const tripLayerGroups = {}; 
         const vdLayerGroup = L.layerGroup();
         let showUncoveredVd = false; // 是否顯示未覆蓋（不在路線上）的 VD
+        const vdManualOverride = {}; // vdid -> 模擬壅塞等級 1~5
+        let vdPointIndex = {};       // vdid -> 最新 VD 點資料（含 levels）
         const depotLayer = L.featureGroup();
 
         const map = L.map('map').setView([24.2, 120.9], 8);
@@ -614,7 +632,8 @@
         const vdToggleControl = L.control({ position: 'topright' });
         vdToggleControl.onAdd = function () {
             const div = L.DomUtil.create('div', 'vd-toggle-panel');
-            div.innerHTML = '<label><input type="checkbox" id="vd-toggle-uncovered"' + (showUncoveredVd ? ' checked' : '') + ' /> 顯示未覆蓋 VD</label>';
+            div.innerHTML = '<label><input type="checkbox" id="vd-toggle-uncovered"' + (showUncoveredVd ? ' checked' : '') + ' /> 顯示未覆蓋 VD</label>'
+                + '<button type="button" id="vd-clear-sim-btn">清除模擬</button>';
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
             return div;
@@ -624,6 +643,21 @@
             if (e.target && e.target.id === 'vd-toggle-uncovered') {
                 showUncoveredVd = e.target.checked;
                 renderVdLayer();
+            }
+        });
+        document.addEventListener('click', function (e) {
+            const t = e.target;
+            if (!t || typeof t.getAttribute !== 'function') return;
+            if (t.id === 'vd-clear-sim-btn') {
+                Object.keys(vdManualOverride).forEach(k => delete vdManualOverride[k]);
+                rerenderVdAndEta();
+                return;
+            }
+            const lvAttr = t.getAttribute('data-lv');
+            const vdidAttr = t.getAttribute('data-vd');
+            if (lvAttr != null && vdidAttr) {
+                applyOverrideScope(vdidAttr, parseInt(lvAttr, 10));
+                rerenderVdAndEta();
             }
         });
 
@@ -1020,17 +1054,154 @@
             renderTimelineView();
         }
 
-        function makeVdWarnIcon(onRoute) {
+        function makeVdWarnIcon(onRoute, color, manual) {
+            const fill = color || VD_WARN_COLOR;
             const svg = '<svg viewBox="0 0 24 24" width="16" height="16">'
-                + '<path d="M12 2 L23 21 H1 Z" fill="' + VD_WARN_COLOR + '" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>'
+                + '<path d="M12 2 L23 21 H1 Z" fill="' + fill + '" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>'
                 + '<rect x="10.9" y="9" width="2.2" height="6.2" rx="1.1" fill="#ffffff"/>'
                 + '<circle cx="12" cy="17.8" r="1.3" fill="#ffffff"/></svg>';
+            const cls = 'vd-warn-icon' + (onRoute ? ' on-route' : '') + (manual ? ' sim' : '');
             return L.divIcon({
-                className: 'vd-warn-icon' + (onRoute ? ' on-route' : ''),
+                className: cls,
                 html: '<div class="vd-warn-box">' + svg + '</div>',
                 iconSize: [18, 18],
                 iconAnchor: [9, 9]
             });
+        }
+
+        function vdLevelLabel(level) { return VD_LEVEL_LABEL[level] || '—'; }
+
+        function repSpeedForLevel(levels, level) {
+            if (Array.isArray(levels)) {
+                const lv = levels.find(x => Number(x.Level) === level);
+                if (lv) {
+                    const lo = (typeof lv.LowValue === 'number') ? lv.LowValue : 0;
+                    const top = (typeof lv.TopValue === 'number') ? lv.TopValue : (lo + 12);
+                    return Math.round((lo + top) / 2);
+                }
+            }
+            return VD_LEVEL_FALLBACK_SPEED[level] || 0;
+        }
+
+        function buildVdPointIndex() {
+            const idx = {};
+            Object.values(tripStore).forEach(t => {
+                if (!t.is_computed || !t.vd_result) return;
+                (t.vd_result.points || []).forEach(p => { idx[p.vdid] = p; });
+            });
+            vdPointIndex = idx;
+        }
+
+        function worstColor(a, b) {
+            return (VD_COLOR_SEVERITY[b] || 0) > (VD_COLOR_SEVERITY[a] || 0) ? b : a;
+        }
+
+        // 有效狀態：即時優先（即時存在時不可被模擬調降），模擬可往上加嚴重度
+        function effectiveVd(vdid) {
+            const p = vdPointIndex[vdid] || {};
+            const levels = p.levels;
+            const liveLevel = (p.level != null) ? p.level : null;
+            const simLevel = vdManualOverride[vdid];
+            if (liveLevel == null && simLevel == null) {
+                return { level: null, color: 'GRAY', speed: 0, manual: false };
+            }
+            let effLevel;
+            if (liveLevel == null) effLevel = simLevel;
+            else if (simLevel == null) effLevel = liveLevel;
+            else effLevel = Math.max(liveLevel, simLevel);
+
+            const manual = (simLevel != null && effLevel === simLevel && (liveLevel == null || simLevel > liveLevel));
+            let speed;
+            if (liveLevel != null && effLevel === liveLevel) {
+                speed = (p.speed != null && p.speed > 0) ? p.speed : repSpeedForLevel(levels, effLevel);
+            } else {
+                speed = repSpeedForLevel(levels, effLevel);
+            }
+            const color = { 1: 'GREEN', 2: 'GREEN', 3: 'ORANGE', 4: 'ORANGE', 5: 'RED' }[effLevel] || 'GRAY';
+            return { level: effLevel, color: color, speed: speed, manual: manual };
+        }
+
+        function isContinuousLeg(covs) {
+            const arr = covs.filter(c => c.s_m != null).slice().sort((a, b) => a.s_m - b.s_m);
+            if (arr.length < 2) return false;
+            for (let i = 1; i < arr.length; i++) {
+                const gap = (arr[i].s_m - (arr[i].back_m || 0)) - (arr[i - 1].s_m + (arr[i - 1].fwd_m || 0));
+                if (gap > 100) return false;
+            }
+            return true;
+        }
+
+        function applyOverrideScope(vdid, lv) {
+            let targetTrip = null, targetLeg = null;
+            Object.values(tripStore).forEach(t => {
+                if (!t.is_computed || !t.vd_result) return;
+                const hit = (t.vd_result.coverage || []).find(c => c.vdid === vdid && c.leg_index != null);
+                if (hit) { targetTrip = t; targetLeg = hit.leg_index; }
+            });
+            let vdids = [vdid];
+            if (targetTrip) {
+                const legCovs = (targetTrip.vd_result.coverage || []).filter(c => c.leg_index === targetLeg);
+                if (isContinuousLeg(legCovs)) vdids = legCovs.map(c => c.vdid);
+            }
+            vdids.forEach(v => { if (lv === 0) delete vdManualOverride[v]; else vdManualOverride[v] = lv; });
+        }
+
+        // 以即時/模擬 VD 速度融合覆蓋段 ETA，並依最嚴重色設定 leg 顏色
+        function applyVdEta(trip) {
+            if (!trip.route_result || !trip.route_result.legs) return;
+            const legs = trip.route_result.legs;
+            legs.forEach(l => {
+                l.duration_min = (l.base_duration_min != null) ? l.base_duration_min : l.duration_min;
+                l.traffic_status = l.base_traffic_status || 'GREEN';
+            });
+            const coverage = (trip.vd_result && trip.vd_result.coverage) || [];
+            const byLeg = {};
+            coverage.forEach(cov => {
+                if (cov.leg_index == null || cov.s_m == null) return;
+                const slot = byLeg[cov.leg_index] = byLeg[cov.leg_index] || { intervals: [], worst: 'GRAY' };
+                const eff = effectiveVd(cov.vdid);
+                if (!eff.speed || eff.speed <= 0) return;
+                slot.intervals.push({
+                    a: cov.s_m - (cov.back_m || 0),
+                    b: cov.s_m + (cov.fwd_m || 0),
+                    speed: Math.min(eff.speed, 90)
+                });
+                slot.worst = worstColor(slot.worst, eff.color);
+            });
+            Object.keys(byLeg).forEach(li => {
+                const leg = legs[Number(li)];
+                if (!leg) return;
+                const slot = byLeg[li];
+                leg.traffic_status = slot.worst || 'GRAY';
+                if (!slot.intervals.length) return;
+                const baseS = (leg.base_duration_min != null ? leg.base_duration_min : leg.duration_min) * 60;
+                const distM = leg.distance_km * 1000;
+                if (baseS <= 0 || distM <= 0) return;
+                const nomSpeed = distM / baseS;
+                const iv = slot.intervals.sort((x, y) => x.a - y.a);
+                const merged = [];
+                iv.forEach(x => {
+                    const m = merged[merged.length - 1];
+                    if (m && x.a <= m.b) { m.b = Math.max(m.b, x.b); m.speed = Math.min(m.speed, x.speed); }
+                    else merged.push({ a: x.a, b: x.b, speed: x.speed });
+                });
+                let adjS = 0;
+                merged.forEach(m => {
+                    const d = Math.max(0, m.b - m.a);
+                    const vs = m.speed / 3.6;
+                    if (vs > 0) adjS += d / vs - d / nomSpeed;
+                });
+                leg.duration_min = Math.max(0.1, Math.round(((baseS + adjS) / 60) * 10) / 10);
+            });
+            trip.route_result.duration_min = Math.round(legs.reduce((s, l) => s + l.duration_min, 0) * 10) / 10;
+        }
+
+        function rerenderVdAndEta() {
+            buildVdPointIndex();
+            Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) applyVdEta(t); });
+            renderSidebar();
+            renderAllMapLayers();
+            renderTimelineView();
         }
 
         function renderAllMapLayers() {
@@ -1038,6 +1209,7 @@
                 map.removeLayer(tripLayerGroups[id]);
                 delete tripLayerGroups[id];
             });
+            buildVdPointIndex();
 
             const allBounds = [];
             Object.values(tripStore).forEach(trip => {
@@ -1067,11 +1239,12 @@
                     // VD 覆蓋段（偵測器標記改由全域 vdLayerGroup 彙總繪製）
                     if (trip.vd_result) {
                         (trip.vd_result.coverage || []).forEach(cov => {
-                            const baseColor = VD_COLORS[cov.color] || VD_COLORS.GRAY;
+                            const eff = effectiveVd(cov.vdid);
+                            const baseColor = VD_COLORS[eff.color] || VD_COLORS.GRAY;
                             L.polyline(cov.path, {
                                 color: baseColor, weight: 8, opacity: 0.85, lineCap: 'round'
                             }).addTo(layerGroup);
-                            if (cov.color !== 'GRAY') {
+                            if (eff.color !== 'GRAY') {
                                 L.polyline(cov.path, {
                                     color: VD_COLORS.GRAY, weight: 8, opacity: 0.9,
                                     className: 'vd-flow', lineCap: 'round'
@@ -1100,6 +1273,7 @@
 
         function renderVdLayer() {
             vdLayerGroup.clearLayers();
+            buildVdPointIndex();
             const byVdid = new Map();
             Object.values(tripStore).forEach(trip => {
                 if (!trip.is_computed || !trip.vd_result) return;
@@ -1107,6 +1281,7 @@
                     const cur = byVdid.get(pt.vdid);
                     if (cur) {
                         cur.on_route = cur.on_route || pt.on_route;
+                        if (cur.levels == null && pt.levels != null) cur.levels = pt.levels;
                     } else {
                         byVdid.set(pt.vdid, Object.assign({}, pt));
                     }
@@ -1115,17 +1290,40 @@
 
             byVdid.forEach(pt => {
                 if (!showUncoveredVd && !pt.on_route) return;
+                const eff = effectiveVd(pt.vdid);
+                const iconColor = pt.on_route ? (VD_COLORS[eff.color] || VD_COLORS.GRAY)
+                    : (pt.speed > 0 ? (VD_COLORS[eff.color] || VD_WARN_COLOR) : VD_WARN_COLOR);
                 const speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
                 const statusTxt = (pt.status === 0 || pt.status === '0') ? '正常' : (pt.status == null ? '無即時資料' : `異常 (${pt.status})`);
                 const timeTxt = pt.collect_time ? String(pt.collect_time).replace('T', ' ').slice(0, 19) : '—';
                 const routeTxt = pt.on_route ? '是（沿線滾動顯示）' : '否';
-                L.marker([pt.lat, pt.lon], { icon: makeVdWarnIcon(pt.on_route) })
-                    .bindPopup(`<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
-                        + `<div class="prop-item">路段: <b>${pt.road || '未知路段'}</b></div>`
-                        + `<div class="prop-item">速度: <b>${speedTxt}</b></div>`
-                        + `<div class="prop-item">狀態: ${statusTxt}</div>`
-                        + `<div class="prop-item">更新時間: ${timeTxt}</div>`
-                        + `<div class="prop-item">是否在路線上: ${routeTxt}</div></div>`)
+                const levelTxt = (eff.level != null) ? `${vdLevelLabel(eff.level)}` : '無資料';
+                const simTxt = vdManualOverride[pt.vdid] != null
+                    ? `<div class="prop-item">模擬: <b>${vdLevelLabel(vdManualOverride[pt.vdid])}</b>（即時優先）</div>` : '';
+
+                let html = `<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
+                    + `<div class="prop-item">路段: <b>${pt.road || '未知路段'}</b></div>`
+                    + `<div class="prop-item">即時速度: <b>${speedTxt}</b></div>`
+                    + `<div class="prop-item">壅塞等級: <b>${levelTxt}</b></div>`
+                    + simTxt
+                    + `<div class="prop-item">狀態: ${statusTxt}</div>`
+                    + `<div class="prop-item">更新時間: ${timeTxt}</div>`
+                    + `<div class="prop-item">是否在路線上: ${routeTxt}</div>`;
+
+                if (pt.on_route) {
+                    const sim = vdManualOverride[pt.vdid];
+                    const labels = ['A', 'B', 'C', 'D', 'E'];
+                    const btns = labels.map((lb, i) => {
+                        const lv = i + 1;
+                        return `<button class="vd-sim-btn${sim === lv ? ' active' : ''}" data-vd="${pt.vdid}" data-lv="${lv}">${lb}</button>`;
+                    }).join('');
+                    html += `<div class="prop-item" style="margin-top:6px;">模擬壅塞（即時優先）:</div>`
+                        + `<div class="vd-sim-row">${btns}<button class="vd-sim-btn" data-vd="${pt.vdid}" data-lv="0">清除</button></div>`;
+                }
+                html += `</div>`;
+
+                L.marker([pt.lat, pt.lon], { icon: makeVdWarnIcon(pt.on_route, iconColor, eff.manual) })
+                    .bindPopup(html)
                     .addTo(vdLayerGroup);
             });
         }
@@ -1313,13 +1511,16 @@
                                 sequence: result.sequence,
                                 legs: result.legs
                             };
+                            (trip.route_result.legs || []).forEach(leg => {
+                                leg.base_duration_min = leg.duration_min;
+                                leg.base_traffic_status = leg.traffic_status || 'GREEN';
+                            });
                             trip.vd_result = {
-                                counties: result.counties || [],
-                                points: result.vd_points || [],
-                                coverage: result.vd_coverage || []
+                                counties: result.counties, 
+                                points: result.vd_points,
+                                coverage: result.vd_coverage
                             };
-                            trip.is_computed = true;
-                            syncLegTrafficStatus(trip);
+                            applyVdEta(trip);
                         }
                     } catch (err) { 
                         console.error(`車次 ${trip.trip_key} 計算失敗:`, err); 
@@ -1339,27 +1540,7 @@
             alert("所有選取車次路徑與預估時間計算完成！可切換至「行程時間系統」檢視時序流程。");
         }
 
-        /* ========== VD 即時車流：左欄顏色同步與每 30 分鐘更新 ========== */
-        function syncLegTrafficStatus(trip) {
-            if (!trip.route_result || !trip.route_result.legs) return;
-            const coverage = (trip.vd_result && trip.vd_result.coverage) || [];
-            if (coverage.length === 0) return;
-
-            const byLeg = {};
-            coverage.forEach(cov => {
-                const li = cov.leg_index;
-                if (li == null) return;
-                const slot = byLeg[li] || { anyData: false };
-                if (cov.color && cov.color !== 'GRAY') slot.anyData = true;
-                byLeg[li] = slot;
-            });
-            trip.route_result.legs.forEach((leg, i) => {
-                const slot = byLeg[i];
-                if (!slot) return; // 未被 VD 涵蓋的 leg 維持原狀（綠色）
-                leg.traffic_status = slot.anyData ? 'GREEN' : 'GRAY';
-            });
-        }
-
+        /* ========== VD 即時車流：顏色/ETA 同步與每 30 分鐘更新 ========== */
         function collectActiveCounties() {
             const set = new Set();
             Object.values(tripStore).forEach(t => {
@@ -1389,19 +1570,23 @@
                 (trip.vd_result.points || []).forEach(pt => {
                     const e = vds[pt.vdid];
                     pt.speed = e ? e.speed : null;
-                    pt.color = e ? e.color : 'GRAY';
+                    pt.color = e ? (e.color || 'GRAY') : 'GRAY';
+                    pt.level = e ? e.level : null;
+                    pt.level_name = e ? e.level_name : '';
+                    pt.levels = e ? e.levels : null;
                     pt.status = e ? e.status : null;
                     pt.collect_time = e ? e.collect_time : null;
                 });
                 (trip.vd_result.coverage || []).forEach(cov => {
                     const e = vds[cov.vdid];
-                    cov.color = e ? e.color : 'GRAY';
+                    cov.color = e ? (e.color || 'GRAY') : 'GRAY';
                     if (e) {
                         cov.speed = e.speed;
+                        cov.level = e.level;
                         cov.collect_time = e.collect_time;
                     }
                 });
-                syncLegTrafficStatus(trip);
+                applyVdEta(trip);
             });
 
             renderAllMapLayers();
