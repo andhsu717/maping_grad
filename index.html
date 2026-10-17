@@ -469,6 +469,15 @@
         .timeline-arrow-wrap.red .timeline-arrow-head { border-top-color: #dc2626; }
         .timeline-arrow-wrap.red .timeline-arrow-badge { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
 
+        /* 灰色（無即時資訊）樣式 */
+        .timeline-arrow-wrap.gray .timeline-arrow-line { background: #94a3b8; }
+        .timeline-arrow-wrap.gray .timeline-arrow-head { border-top-color: #94a3b8; }
+        .timeline-arrow-wrap.gray .timeline-arrow-badge { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+
+        /* VD 覆蓋段：車流色 + 灰色沿路滾動（如傳統招牌滾輪） */
+        @keyframes vd-march { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -28; } }
+        .vd-flow { stroke-dasharray: 12 16; animation: vd-march 1.1s linear infinite; }
+
         /* 地圖區域 */
         #map { flex: 1; height: 100%; position: relative; }
         .stop-popup { font-size: 12px; line-height: 1.6; min-width: 230px; }
@@ -568,6 +577,10 @@
             "#0d9488", "#d97706", "#db2777", "#4f46e5", "#ca8a04",
             "#059669", "#65a30d", "#2563eb", "#9333ea", "#c026d3"
         ];
+
+        // VD 車流顏色（與左欄箭頭色票一致）
+        const VD_COLORS = { GREEN: '#16a34a', ORANGE: '#ea580c', RED: '#dc2626', GRAY: '#94a3b8' };
+        const LIVE_POLL_MS = 30 * 60 * 1000; // 每 30 分鐘更新即時車流
 
         let depotStore = []; 
         let tripStore = {};  
@@ -967,6 +980,7 @@
             Object.values(tripStore).forEach(trip => {
                 trip.is_computed = false;
                 trip.route_result = null;
+                trip.vd_result = null;
             });
             renderSidebar();
             renderAllMapLayers();
@@ -1002,6 +1016,32 @@
                                 iconAnchor: [18, -6]
                             });
                             L.marker([seqStop.lat, seqStop.lon], { icon: seqLabelIcon }).addTo(layerGroup);
+                        });
+                    }
+
+                    // VD 覆蓋段與偵測器標記
+                    if (trip.vd_result) {
+                        (trip.vd_result.coverage || []).forEach(cov => {
+                            const baseColor = VD_COLORS[cov.color] || VD_COLORS.GRAY;
+                            L.polyline(cov.path, {
+                                color: baseColor, weight: 8, opacity: 0.85, lineCap: 'round'
+                            }).addTo(layerGroup);
+                            if (cov.color !== 'GRAY') {
+                                L.polyline(cov.path, {
+                                    color: VD_COLORS.GRAY, weight: 8, opacity: 0.9,
+                                    className: 'vd-flow', lineCap: 'round'
+                                }).addTo(layerGroup);
+                            }
+                        });
+                        (trip.vd_result.points || []).forEach(pt => {
+                            const col = VD_COLORS[pt.color] || VD_COLORS.GRAY;
+                            const speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
+                            L.circleMarker([pt.lat, pt.lon], {
+                                radius: 4, color: '#ffffff', weight: 1, fillColor: col, fillOpacity: 1
+                            }).bindPopup(`<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
+                                + `<div class="prop-item">位置: ${pt.road || '未知路段'}</div>`
+                                + `<div class="prop-item">速度: <b>${speedTxt}</b></div></div>`)
+                                .addTo(layerGroup);
                         });
                     }
                 }
@@ -1144,7 +1184,9 @@
                 if (index < legs.length) {
                     const leg = legs[index];
                     const arrowEl = document.createElement('div');
-                    const statusClass = leg.traffic_status === 'RED' ? 'red' : (leg.traffic_status === 'ORANGE' ? 'orange' : '');
+                    const statusClass = leg.traffic_status === 'RED' ? 'red'
+                        : (leg.traffic_status === 'ORANGE' ? 'orange'
+                        : (leg.traffic_status === 'GRAY' ? 'gray' : ''));
                     arrowEl.className = `timeline-arrow-wrap ${statusClass}`.trim();
                     arrowEl.innerHTML = `
                         <div class="timeline-arrow-line"></div>
@@ -1202,7 +1244,13 @@
                                 sequence: result.sequence,
                                 legs: result.legs
                             };
+                            trip.vd_result = {
+                                counties: result.counties || [],
+                                points: result.vd_points || [],
+                                coverage: result.vd_coverage || []
+                            };
                             trip.is_computed = true;
+                            syncLegTrafficStatus(trip);
                         }
                     } catch (err) { 
                         console.error(`車次 ${trip.trip_key} 計算失敗:`, err); 
@@ -1221,6 +1269,81 @@
             renderTimelineView();
             alert("所有選取車次路徑與預估時間計算完成！可切換至「行程時間系統」檢視時序流程。");
         }
+
+        /* ========== VD 即時車流：左欄顏色同步與每 30 分鐘更新 ========== */
+        function syncLegTrafficStatus(trip) {
+            if (!trip.route_result || !trip.route_result.legs) return;
+            const coverage = (trip.vd_result && trip.vd_result.coverage) || [];
+            if (coverage.length === 0) return;
+
+            const byLeg = {};
+            coverage.forEach(cov => {
+                const li = cov.leg_index;
+                if (li == null) return;
+                const slot = byLeg[li] || { anyData: false };
+                if (cov.color && cov.color !== 'GRAY') slot.anyData = true;
+                byLeg[li] = slot;
+            });
+            trip.route_result.legs.forEach((leg, i) => {
+                const slot = byLeg[i];
+                if (!slot) return; // 未被 VD 涵蓋的 leg 維持原狀（綠色）
+                leg.traffic_status = slot.anyData ? 'GREEN' : 'GRAY';
+            });
+        }
+
+        function collectActiveCounties() {
+            const set = new Set();
+            Object.values(tripStore).forEach(t => {
+                if (t.is_computed && t.vd_result && Array.isArray(t.vd_result.counties)) {
+                    t.vd_result.counties.forEach(c => set.add(c));
+                }
+            });
+            return [...set];
+        }
+
+        async function refreshLiveTraffic() {
+            const counties = collectActiveCounties();
+            if (counties.length === 0) return;
+            let vds = {};
+            try {
+                const resp = await fetch(`http://127.0.0.1:8000/api/traffic/live?counties=${encodeURIComponent(counties.join(','))}`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                vds = data.vds || {};
+            } catch (err) {
+                console.error('即時車流更新失敗:', err);
+                return;
+            }
+
+            Object.values(tripStore).forEach(trip => {
+                if (!trip.is_computed || !trip.vd_result) return;
+                (trip.vd_result.points || []).forEach(pt => {
+                    const e = vds[pt.vdid];
+                    pt.speed = e ? e.speed : null;
+                    pt.color = e ? e.color : 'GRAY';
+                });
+                (trip.vd_result.coverage || []).forEach(cov => {
+                    const e = vds[cov.vdid];
+                    cov.color = e ? e.color : 'GRAY';
+                    if (e) {
+                        cov.speed = e.speed;
+                        cov.collect_time = e.collect_time;
+                    }
+                });
+                syncLegTrafficStatus(trip);
+            });
+
+            renderAllMapLayers();
+            renderTimelineView();
+        }
+
+        let liveTrafficTimer = null;
+        function startLiveTrafficPolling() {
+            if (liveTrafficTimer) return;
+            liveTrafficTimer = setInterval(refreshLiveTraffic, LIVE_POLL_MS);
+        }
+
+        startLiveTrafficPolling();
     </script>
 </body>
 </html>
