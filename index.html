@@ -487,6 +487,8 @@
         .vd-warn-icon.on-route .vd-warn-box {
             box-shadow: 0 0 0 2px #f59e0b, 0 0 0 4px rgba(245, 158, 11, 0.35);
         }
+        .vd-toggle-panel { background: #ffffff; padding: 6px 10px; border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.3); font-size: 12px; color: #334155; }
+        .vd-toggle-panel label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
 
         /* 地圖區域 */
         #map { flex: 1; height: 100%; position: relative; }
@@ -597,6 +599,8 @@
         let tripStore = {};  
         const expandedDates = new Set(); 
         const tripLayerGroups = {}; 
+        const vdLayerGroup = L.layerGroup();
+        let showUncoveredVd = false; // 是否顯示未覆蓋（不在路線上）的 VD
         const depotLayer = L.featureGroup();
 
         const map = L.map('map').setView([24.2, 120.9], 8);
@@ -605,6 +609,23 @@
             attribution: '&copy; OpenStreetMap contributors'
         }).addTo(map);
         depotLayer.addTo(map);
+        vdLayerGroup.addTo(map);
+
+        const vdToggleControl = L.control({ position: 'topright' });
+        vdToggleControl.onAdd = function () {
+            const div = L.DomUtil.create('div', 'vd-toggle-panel');
+            div.innerHTML = '<label><input type="checkbox" id="vd-toggle-uncovered"' + (showUncoveredVd ? ' checked' : '') + ' /> 顯示未覆蓋 VD</label>';
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+        };
+        vdToggleControl.addTo(map);
+        document.addEventListener('change', function (e) {
+            if (e.target && e.target.id === 'vd-toggle-uncovered') {
+                showUncoveredVd = e.target.checked;
+                renderVdLayer();
+            }
+        });
 
         const tripListEl = document.getElementById('trip-list');
         const scrollTopBtn = document.getElementById('scrollTopBtn');
@@ -1043,7 +1064,7 @@
                         });
                     }
 
-                    // VD 覆蓋段與偵測器標記
+                    // VD 覆蓋段（偵測器標記改由全域 vdLayerGroup 彙總繪製）
                     if (trip.vd_result) {
                         (trip.vd_result.coverage || []).forEach(cov => {
                             const baseColor = VD_COLORS[cov.color] || VD_COLORS.GRAY;
@@ -1056,20 +1077,6 @@
                                     className: 'vd-flow', lineCap: 'round'
                                 }).addTo(layerGroup);
                             }
-                        });
-                        (trip.vd_result.points || []).forEach(pt => {
-                            const speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
-                            const statusTxt = (pt.status === 0 || pt.status === '0') ? '正常' : (pt.status == null ? '未知' : `異常 (${pt.status})`);
-                            const timeTxt = pt.collect_time ? String(pt.collect_time).replace('T', ' ').slice(0, 19) : '—';
-                            const routeTxt = pt.on_route ? '是（沿線滾動顯示）' : '否';
-                            L.marker([pt.lat, pt.lon], { icon: makeVdWarnIcon(pt.on_route) })
-                                .bindPopup(`<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
-                                    + `<div class="prop-item">路段: <b>${pt.road || '未知路段'}</b></div>`
-                                    + `<div class="prop-item">速度: <b>${speedTxt}</b></div>`
-                                    + `<div class="prop-item">狀態: ${statusTxt}</div>`
-                                    + `<div class="prop-item">更新時間: ${timeTxt}</div>`
-                                    + `<div class="prop-item">是否在路線上: ${routeTxt}</div></div>`)
-                                .addTo(layerGroup);
                         });
                     }
                 }
@@ -1086,7 +1093,41 @@
                 });
             });
 
+            renderVdLayer();
+
             if (allBounds.length > 0) map.fitBounds(L.latLngBounds(allBounds).pad(0.08));
+        }
+
+        function renderVdLayer() {
+            vdLayerGroup.clearLayers();
+            const byVdid = new Map();
+            Object.values(tripStore).forEach(trip => {
+                if (!trip.is_computed || !trip.vd_result) return;
+                (trip.vd_result.points || []).forEach(pt => {
+                    const cur = byVdid.get(pt.vdid);
+                    if (cur) {
+                        cur.on_route = cur.on_route || pt.on_route;
+                    } else {
+                        byVdid.set(pt.vdid, Object.assign({}, pt));
+                    }
+                });
+            });
+
+            byVdid.forEach(pt => {
+                if (!showUncoveredVd && !pt.on_route) return;
+                const speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
+                const statusTxt = (pt.status === 0 || pt.status === '0') ? '正常' : (pt.status == null ? '無即時資料' : `異常 (${pt.status})`);
+                const timeTxt = pt.collect_time ? String(pt.collect_time).replace('T', ' ').slice(0, 19) : '—';
+                const routeTxt = pt.on_route ? '是（沿線滾動顯示）' : '否';
+                L.marker([pt.lat, pt.lon], { icon: makeVdWarnIcon(pt.on_route) })
+                    .bindPopup(`<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
+                        + `<div class="prop-item">路段: <b>${pt.road || '未知路段'}</b></div>`
+                        + `<div class="prop-item">速度: <b>${speedTxt}</b></div>`
+                        + `<div class="prop-item">狀態: ${statusTxt}</div>`
+                        + `<div class="prop-item">更新時間: ${timeTxt}</div>`
+                        + `<div class="prop-item">是否在路線上: ${routeTxt}</div></div>`)
+                    .addTo(vdLayerGroup);
+            });
         }
 
         function createStopPopupContent(stop, currentTrip) {

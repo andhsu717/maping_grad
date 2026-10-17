@@ -186,6 +186,8 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
             off, s = _project_point_to_path(lat, lon, path, cum)
 
             entry = live.get(vdid)
+            if entry is not None and entry.get("status") != 0:
+                continue
             speed = entry.get("speed") if entry else None
             color = classify_vd_color(speed)
             on_route = off <= COVERAGE_THRESHOLD_M
