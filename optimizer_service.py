@@ -184,7 +184,26 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
 
             lat = float(lat); lon = float(lon)
             off, s = _project_point_to_path(lat, lon, path, cum)
-            if off > COVERAGE_THRESHOLD_M:
+
+            entry = live.get(vdid)
+            speed = entry.get("speed") if entry else None
+            color = classify_vd_color(speed)
+            on_route = off <= COVERAGE_THRESHOLD_M
+
+            points.append({
+                "vdid": vdid,
+                "lat": lat,
+                "lon": lon,
+                "road": vd.get("RoadName", ""),
+                "road_class": vd.get("RoadClass"),
+                "speed": speed,
+                "color": color,
+                "status": entry.get("status") if entry else None,
+                "collect_time": entry.get("collect_time") if entry else None,
+                "on_route": on_route,
+            })
+
+            if not on_route:
                 continue
 
             back_turn = max([t for t in turns if t <= s], default=0.0)
@@ -201,19 +220,6 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
                     leg_index = i
                     break
 
-            entry = live.get(vdid)
-            speed = entry.get("speed") if entry else None
-            color = classify_vd_color(speed)
-
-            points.append({
-                "vdid": vdid,
-                "lat": lat,
-                "lon": lon,
-                "road": vd.get("RoadName", ""),
-                "road_class": vd.get("RoadClass"),
-                "speed": speed,
-                "color": color,
-            })
             coverage.append({
                 "vdid": vdid,
                 "leg_index": leg_index,

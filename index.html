@@ -478,6 +478,16 @@
         @keyframes vd-march { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -28; } }
         .vd-flow { stroke-dasharray: 12 16; animation: vd-march 1.1s linear infinite; }
 
+        /* VD 警告圖示（單一顏色，路線上的加外框強調） */
+        .vd-warn-icon { line-height: 0; }
+        .vd-warn-icon .vd-warn-box {
+            display: flex; align-items: center; justify-content: center;
+            width: 18px; height: 18px; border-radius: 50%; background: rgba(255,255,255,0.85);
+        }
+        .vd-warn-icon.on-route .vd-warn-box {
+            box-shadow: 0 0 0 2px #f59e0b, 0 0 0 4px rgba(245, 158, 11, 0.35);
+        }
+
         /* 地圖區域 */
         #map { flex: 1; height: 100%; position: relative; }
         .stop-popup { font-size: 12px; line-height: 1.6; min-width: 230px; }
@@ -580,6 +590,7 @@
 
         // VD 車流顏色（與左欄箭頭色票一致）
         const VD_COLORS = { GREEN: '#16a34a', ORANGE: '#ea580c', RED: '#dc2626', GRAY: '#94a3b8' };
+        const VD_WARN_COLOR = '#f59e0b';
         const LIVE_POLL_MS = 30 * 60 * 1000; // 每 30 分鐘更新即時車流
 
         let depotStore = []; 
@@ -988,6 +999,19 @@
             renderTimelineView();
         }
 
+        function makeVdWarnIcon(onRoute) {
+            const svg = '<svg viewBox="0 0 24 24" width="16" height="16">'
+                + '<path d="M12 2 L23 21 H1 Z" fill="' + VD_WARN_COLOR + '" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>'
+                + '<rect x="10.9" y="9" width="2.2" height="6.2" rx="1.1" fill="#ffffff"/>'
+                + '<circle cx="12" cy="17.8" r="1.3" fill="#ffffff"/></svg>';
+            return L.divIcon({
+                className: 'vd-warn-icon' + (onRoute ? ' on-route' : ''),
+                html: '<div class="vd-warn-box">' + svg + '</div>',
+                iconSize: [18, 18],
+                iconAnchor: [9, 9]
+            });
+        }
+
         function renderAllMapLayers() {
             Object.keys(tripLayerGroups).forEach(id => {
                 map.removeLayer(tripLayerGroups[id]);
@@ -1034,13 +1058,17 @@
                             }
                         });
                         (trip.vd_result.points || []).forEach(pt => {
-                            const col = VD_COLORS[pt.color] || VD_COLORS.GRAY;
                             const speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
-                            L.circleMarker([pt.lat, pt.lon], {
-                                radius: 4, color: '#ffffff', weight: 1, fillColor: col, fillOpacity: 1
-                            }).bindPopup(`<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
-                                + `<div class="prop-item">位置: ${pt.road || '未知路段'}</div>`
-                                + `<div class="prop-item">速度: <b>${speedTxt}</b></div></div>`)
+                            const statusTxt = (pt.status === 0 || pt.status === '0') ? '正常' : (pt.status == null ? '未知' : `異常 (${pt.status})`);
+                            const timeTxt = pt.collect_time ? String(pt.collect_time).replace('T', ' ').slice(0, 19) : '—';
+                            const routeTxt = pt.on_route ? '是（沿線滾動顯示）' : '否';
+                            L.marker([pt.lat, pt.lon], { icon: makeVdWarnIcon(pt.on_route) })
+                                .bindPopup(`<div class="stop-popup"><div class="stop-popup-title">VD ${pt.vdid}</div>`
+                                    + `<div class="prop-item">路段: <b>${pt.road || '未知路段'}</b></div>`
+                                    + `<div class="prop-item">速度: <b>${speedTxt}</b></div>`
+                                    + `<div class="prop-item">狀態: ${statusTxt}</div>`
+                                    + `<div class="prop-item">更新時間: ${timeTxt}</div>`
+                                    + `<div class="prop-item">是否在路線上: ${routeTxt}</div></div>`)
                                 .addTo(layerGroup);
                         });
                     }
@@ -1321,6 +1349,8 @@
                     const e = vds[pt.vdid];
                     pt.speed = e ? e.speed : null;
                     pt.color = e ? e.color : 'GRAY';
+                    pt.status = e ? e.status : null;
+                    pt.collect_time = e ? e.collect_time : null;
                 });
                 (trip.vd_result.coverage || []).forEach(cov => {
                     const e = vds[cov.vdid];
