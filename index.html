@@ -63,7 +63,8 @@
         .header-title span { font-size: 11px; color: #94a3b8; }
         
         .upload-bar { display: flex; align-items: center; gap: 14px; }
-        .upload-bar label { font-size: 12px; color: #cbd5e1; font-weight: 500; display: flex; align-items: center; gap: 4px; }
+        .upload-bar > div { display: flex; align-items: center; gap: 6px; }
+        .upload-bar label { font-size: 12px; color: #cbd5e1; font-weight: 500; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
         input[type="file"] { 
             background: #1e293b; 
             color: #f8fafc; 
@@ -78,8 +79,8 @@
         .main-layout { display: flex; flex: 1; height: calc(100vh - 54px); position: relative; overflow: hidden; }
 
         #sidebar {
-            width: 380px;
-            min-width: 380px;
+            width: 420px;
+            min-width: 420px;
             background: #ffffff;
             border-right: 1px solid #e2e8f0;
             display: flex;
@@ -90,7 +91,7 @@
             transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
         #sidebar.collapsed {
-            margin-left: -380px;
+            margin-left: -420px;
         }
 
         /* 側邊欄頂部 Tab 切換列 (多層級頁面控制) */
@@ -429,7 +430,7 @@
         }
         .timeline-arrow-line {
             width: 3px;
-            height: 24px;
+            height: 48px;
             background: #16a34a; /* 綠色箭頭線條 */
         }
         .timeline-arrow-badge {
@@ -489,11 +490,11 @@
         </div>
         <div class="upload-bar">
             <div>
-                <label>🚩 出發點：</label>
+                <label>出發點：</label>
                 <input type="file" id="depot-file" accept=".xlsx, .xls" />
             </div>
             <div>
-                <label>📦 配送單號：</label>
+                <label>配送單：</label>
                 <input type="file" id="excel-file" accept=".xlsx, .xls" />
             </div>
         </div>
@@ -503,8 +504,8 @@
         <!-- 側邊欄 (紅色框：可折疊面板與多層級 Tab) -->
         <div id="sidebar">
             <div class="sidebar-tabs">
-                <button id="tab-btn-trips" class="tab-btn active" onclick="switchTab('trips')">📋 行程車次管理</button>
-                <button id="tab-btn-timeline" class="tab-btn" onclick="switchTab('timeline')">⏱️ 行程時間系統</button>
+            <button id="tab-btn-trips" class="tab-btn active" onclick="switchTab('trips')">行程車次管理</button>
+            <button id="tab-btn-timeline" class="tab-btn" onclick="switchTab('timeline')">行程時間系統</button>
             </div>
 
             <!-- Tab 1: 行程車次管理 -->
@@ -520,8 +521,8 @@
                     <span id="summary-meta" style="font-size: 11px; color: #64748b;">請上傳檔案載入資料...</span>
                     
                     <div class="action-buttons">
-                        <button id="btn-execute" class="btn-run" onclick="runQueueOptimization()" disabled>🚀 執行計算並輸出</button>
-                        <button id="btn-clear" class="btn-clear" onclick="clearAllRoutes()" disabled>🧹 清除路線</button>
+                        <button id="btn-execute" class="btn-run" onclick="runQueueOptimization()" disabled>執行計算並輸出</button>
+                        <button id="btn-clear" class="btn-clear" onclick="clearAllRoutes()" disabled>清除路線</button>
                     </div>
                     
                     <div id="progress-bar-wrap" class="progress-bar-container">
@@ -533,13 +534,13 @@
                     <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">尚未載入單號資料</div>
                 </div>
 
-                <button id="scrollTopBtn" class="scroll-to-top-btn" onclick="scrollToTop()" title="回到最頂部">⬆️</button>
+                <button id="scrollTopBtn" class="scroll-to-top-btn" onclick="scrollToTop()" title="回到最頂部">↑</button>
             </div>
 
             <!-- Tab 2: 行程時間系統 (綠色框) -->
             <div id="tab-timeline-content">
                 <div class="timeline-header-bar">
-                    <label>🚗 選擇已計算車次：</label>
+                    <label>選擇已計算車次：</label>
                     <div class="trip-select" id="timeline-trip-select">
                         <button type="button" class="trip-select-btn" id="timeline-trip-btn" onclick="toggleTripSelectMenu()">
                             <span class="trip-select-dot" id="timeline-trip-dot" style="background: transparent;"></span>
@@ -786,12 +787,12 @@
             depotStore.forEach(d => {
                 const icon = L.divIcon({
                     className: 'depot-marker',
-                    html: `<div style="background:#dc2626; color:#fff; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; border:2px solid #fff; font-size:11px; box-shadow:0 2px 5px rgba(0,0,0,0.3);">🚩</div>`,
+                    html: `<div style="background:#dc2626; color:#fff; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; border:2px solid #fff; font-size:12px; box-shadow:0 2px 5px rgba(0,0,0,0.3);">起</div>`,
                     iconSize: [22, 22],
                     iconAnchor: [11, 11]
                 });
                 L.marker([d.lat, d.lon], { icon })
-                    .bindPopup(`<b>🚩 出發點: ${d.name}</b><br>代碼: ${d.id}`)
+                    .bindPopup(`<b>出發點: ${d.name}</b><br>代碼: ${d.id}`)
                     .addTo(depotLayer);
             });
             if (depotStore.length > 0) map.fitBounds(depotLayer.getBounds().pad(0.1));
@@ -831,7 +832,7 @@
                         <div class="date-title-group">
                             <input type="checkbox" data-date="${date}" ${allSelected ? 'checked' : ''} 
                                 onclick="event.stopPropagation(); toggleDateSelect(this.getAttribute('data-date'), this.checked)" />
-                            <span>📅 ${date}</span>
+                            <span>${date}</span>
                             <span style="font-size:11px; font-weight:normal; color:#64748b; margin-left:4px;">(${dateTrips.length} 車)</span>
                         </div>
                         <span class="toggle-icon ${isExpanded ? '' : 'collapsed'}">▼</span>
@@ -886,10 +887,10 @@
                         </div>
                         <div class="trip-stats-box">
                             <div class="trip-stat-item">
-                                <span style="color:#cbd5e1; font-size: 13px;">⚖️</span> ${totalWeight.toFixed(1)} kg
+                                重量 <b>${totalWeight.toFixed(1)}</b> kg
                             </div>
                             <div class="trip-stat-item">
-                                <span style="color:#cbd5e1; font-size: 13px;">📐</span> ${totalVol.toFixed(2)} cbm
+                                材積 <b>${totalVol.toFixed(2)}</b> cbm
                             </div>
                         </div>
                         <div class="depot-select-row">
@@ -901,8 +902,8 @@
                         ${stopListHtml ? `<div class="trip-stop-list">${stopListHtml}</div>` : ''}
                         ${trip.is_computed && trip.route_result ? `
                             <div class="trip-time-badge">
-                                <span>⏱️ 預估行駛: <b>${trip.route_result.duration_min} 分鐘</b></span>
-                                <span>🛣️ ${trip.route_result.distance_km} km</span>
+                                <span>預估行駛: <b>${trip.route_result.duration_min} 分鐘</b></span>
+                                <span>${trip.route_result.distance_km} km</span>
                             </div>
                         ` : ''}
                     `;
@@ -1023,15 +1024,15 @@
         function createStopPopupContent(stop, currentTrip) {
             const isCancelled = stop.status === 'CANCELLED';
             const dynamicProps = [];
-            if (stop.item_name) dynamicProps.push(`<div class="prop-item">📦 品名: <b>${stop.item_name}</b></div>`);
-            if (stop.weight_kg) dynamicProps.push(`<div class="prop-item">⚖️ 重量: <b>${stop.weight_kg} kg</b></div>`);
-            if (stop.volume_cbm) dynamicProps.push(`<div class="prop-item">📐 材積: <b>${stop.volume_cbm} cbm</b></div>`);
+            if (stop.item_name) dynamicProps.push(`<div class="prop-item">品名: <b>${stop.item_name}</b></div>`);
+            if (stop.weight_kg) dynamicProps.push(`<div class="prop-item">重量: <b>${stop.weight_kg} kg</b></div>`);
+            if (stop.volume_cbm) dynamicProps.push(`<div class="prop-item">材積: <b>${stop.volume_cbm} cbm</b></div>`);
 
             return `
                 <div class="stop-popup">
                     <div class="stop-popup-title" style="color:${currentTrip.color};">${stop.name} (${stop.stop_id})</div>
-                    <div class="prop-item">📅 日期: <b>${stop.date}</b> | 車次: <b>${stop.order_id}</b></div>
-                    <div class="prop-item">📍 地址: ${stop.address || '無'}</div>
+                    <div class="prop-item">日期: <b>${stop.date}</b> | 車次: <b>${stop.order_id}</b></div>
+                    <div class="prop-item">地址: ${stop.address || '無'}</div>
                     ${dynamicProps.join('')}
                 </div>
             `;
@@ -1119,7 +1120,7 @@
 
                 if (item.type === 'DEPOT') {
                     nodeEl.innerHTML = `
-                        <div class="node-dot" style="background: #dc2626;">🚩</div>
+                        <div class="node-dot" style="background: #dc2626;">起</div>
                         <div class="node-content">
                             <div class="node-title-row">
                                 <span class="node-title">出發點：${item.name}</span>
@@ -1131,7 +1132,7 @@
                         <div class="node-dot" style="background: ${trip.color};">#${item.seq_no}</div>
                         <div class="node-content">
                             <div class="node-title-row">
-                                <span class="node-title">📍 ${item.address || '無地址資料'}</span>
+                                <span class="node-title">${item.address || '無地址資料'}</span>
                                 <span class="node-count-badge">${item.merged_count} 站</span>
                             </div>
                         </div>
@@ -1148,7 +1149,7 @@
                     arrowEl.innerHTML = `
                         <div class="timeline-arrow-line"></div>
                         <div class="timeline-arrow-badge">
-                            <span>⏱️ 預估時間: ${leg.duration_min} 分鐘</span>
+                            <span>預估時間: ${leg.duration_min} 分鐘</span>
                         </div>
                         <div class="timeline-arrow-head"></div>
                     `;
@@ -1175,7 +1176,7 @@
                 const trip = selectedTrips[i];
                 const activeStops = trip.stops.filter(s => s.status === 'ACTIVE');
 
-                runBtn.innerText = `⏳ (${i + 1}/${selectedTrips.length}) 計算 [${trip.date}] ${trip.order_id}...`;
+                runBtn.innerText = `(${i + 1}/${selectedTrips.length}) 計算 [${trip.date}] ${trip.order_id}...`;
                 progressBar.style.width = `${Math.round(((i + 1) / selectedTrips.length) * 100)}%`;
 
                 if (activeStops.length > 0 && trip.assigned_depot) {
@@ -1210,7 +1211,7 @@
                 await new Promise(r => setTimeout(r, 120)); 
             }
 
-            runBtn.innerText = "🚀 執行計算並輸出";
+            runBtn.innerText = "執行計算並輸出";
             runBtn.disabled = false; 
             clearBtn.disabled = false;
             progressWrap.style.display = 'none';
@@ -1223,4 +1224,3 @@
     </script>
 </body>
 </html>
-```eof
