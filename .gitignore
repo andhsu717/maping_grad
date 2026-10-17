@@ -1,0 +1,4 @@
+# TDX 憑證（請勿提交）
+key.env
+.env
+*.env
