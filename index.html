@@ -282,6 +282,12 @@
             border-radius: 4px; 
         }
         .trip-stat-item { display: flex; align-items: center; gap: 4px; }
+
+        /* 紫色框：站點明細 (站點號碼 + 地址) */
+        .trip-stop-list { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+        .trip-stop-item { display: flex; align-items: baseline; gap: 6px; font-size: 10px; color: #475569; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 4px; padding: 3px 6px; }
+        .trip-stop-no { font-weight: 700; color: #0284c7; flex-shrink: 0; }
+        .trip-stop-addr { color: #64748b; word-break: break-all; }
         
         .depot-select-row { display: flex; align-items: center; font-size: 11px; color: #475569; }
         .depot-select-row span { margin-right: 2px; }
@@ -368,9 +374,7 @@
         .node-content { flex: 1; min-width: 0; }
         .node-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
         .node-title { font-size: 13px; font-weight: 700; color: #0f172a; }
-        .node-badge-merged { font-size: 10px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; font-weight: 600; border: 1px solid #fde68a; }
         .node-addr { font-size: 11px; color: #475569; word-break: break-all; margin-bottom: 4px; }
-        .node-orders-list { font-size: 10px; color: #64748b; background: #f8fafc; padding: 4px 6px; border-radius: 4px; border: 1px dashed #cbd5e1; }
 
         /* 箭頭樣式 (依需求：現階段以綠色為主) */
         .timeline-arrow-wrap {
@@ -400,7 +404,6 @@
             box-shadow: 0 1px 3px rgba(0,0,0,0.06);
             margin: 2px 0;
         }
-        .timeline-arrow-street { font-size: 10px; color: #166534; font-weight: normal; }
         .timeline-arrow-head {
             width: 0; 
             height: 0; 
@@ -795,6 +798,14 @@
                         `<option value="${d.id}" ${trip.assigned_depot && trip.assigned_depot.id === d.id ? 'selected' : ''}>${d.name}</option>`
                     ).join('');
 
+                    // 紫色框：站點明細 (站點號碼 + 地址)，已計算優先取合併後順序
+                    const stopList = (trip.is_computed && trip.route_result && trip.route_result.sequence)
+                        ? trip.route_result.sequence.filter(s => s.type === 'STOP').map(s => ({ no: s.stop_id, addr: s.address }))
+                        : trip.stops.filter(s => s.status === 'ACTIVE').map(s => ({ no: s.stop_id, addr: s.address }));
+                    const stopListHtml = stopList.map(s =>
+                        `<div class="trip-stop-item"><span class="trip-stop-no">${s.no}</span><span class="trip-stop-addr">${s.addr || '無地址'}</span></div>`
+                    ).join('');
+
                     // 紫色框：高度還原簡報中的潔淨樣式 (Icon與並排資訊)
                     const card = document.createElement('div');
                     card.className = 'trip-card';
@@ -822,6 +833,7 @@
                                 ${depotOptions || '<option>無可用起點</option>'}
                             </select>
                         </div>
+                        ${stopListHtml ? `<div class="trip-stop-list">${stopListHtml}</div>` : ''}
                         ${trip.is_computed && trip.route_result ? `
                             <div class="trip-time-badge">
                                 <span>⏱️ 預估行駛: <b>${trip.route_result.duration_min} 分鐘</b></span>
@@ -1010,37 +1022,31 @@
                             <div class="node-title-row">
                                 <span class="node-title">出發點：${item.name}</span>
                             </div>
-                            <div class="node-addr">代碼: ${item.id}</div>
                         </div>
                     `;
                 } else {
-                    const orderIds = item.orders.map(o => o.stop_id).join(', ');
                     nodeEl.innerHTML = `
                         <div class="node-dot" style="background: ${trip.color};">#${item.seq_no}</div>
                         <div class="node-content">
                             <div class="node-title-row">
                                 <span class="node-title">站點號碼: ${item.stop_id}</span>
-                                ${item.is_merged ? `<span class="node-badge-merged">同址合併 ${item.merged_count} 單</span>` : ''}
                             </div>
                             <div class="node-addr">📍 ${item.address || '無地址資料'}</div>
-                            ${item.is_merged ? `<div class="node-orders-list">包含單號：${orderIds}</div>` : ''}
                         </div>
                     `;
                 }
                 flowContainer.appendChild(nodeEl);
 
-                // 2. 節點間的連接箭頭 (依需求：現階段以綠色為主)
+                // 2. 節點間的連接箭頭 (依需求：現階段以綠色為主，預留 orange / red)
                 if (index < legs.length) {
                     const leg = legs[index];
                     const arrowEl = document.createElement('div');
-                    // 綠色箭頭線條，架構預留 orange / red
-                    arrowEl.className = 'timeline-arrow-wrap';
+                    const statusClass = leg.traffic_status === 'RED' ? 'red' : (leg.traffic_status === 'ORANGE' ? 'orange' : '');
+                    arrowEl.className = `timeline-arrow-wrap ${statusClass}`.trim();
                     arrowEl.innerHTML = `
                         <div class="timeline-arrow-line"></div>
                         <div class="timeline-arrow-badge">
-                            <span>⏱️ 預估行駛: ${leg.duration_min} 分鐘</span>
-                            <span>(${leg.distance_km} km)</span>
-                            <span class="timeline-arrow-street">🛣️ ${leg.main_street}</span>
+                            <span>⏱️ 預估時間: ${leg.duration_min} 分鐘</span>
                         </div>
                         <div class="timeline-arrow-head"></div>
                     `;
