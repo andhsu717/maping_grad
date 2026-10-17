@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智慧物流 - 車次分組與互動排程系統 (多日版)</title>
+    <title>智慧物流動態排程與調度系統</title>
 
     <!-- Leaflet CSS & JS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -14,52 +14,147 @@
 
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; background: #f8fafc; color: #1e293b; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
+            display: flex; 
+            flex-direction: column; 
+            height: 100vh; 
+            background: #f8fafc; 
+            color: #1e293b; 
+            overflow: hidden;
+        }
 
+        /* ========== 頂部導覽列 (藍色框：標題左移 + 漢堡選單按鈕) ========== */
         header {
             background-color: #0f172a;
             color: #ffffff;
-            padding: 10px 20px;
+            padding: 10px 18px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
             z-index: 1000;
+            height: 54px;
         }
-        .header-title h2 { font-size: 17px; font-weight: 700; }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .btn-hamburger {
+            background: #1e293b;
+            color: #ffffff;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .btn-hamburger:hover {
+            background: #334155;
+            border-color: #475569;
+        }
+        .header-title h2 { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
         .header-title span { font-size: 11px; color: #94a3b8; }
-        .upload-bar { display: flex; align-items: center; gap: 12px; }
-        .upload-bar label { font-size: 12px; color: #cbd5e1; font-weight: 500; }
-        input[type="file"] { background: #1e293b; color: #f8fafc; padding: 4px 8px; border-radius: 4px; font-size: 12px; border: 1px solid #334155; cursor: pointer; }
+        
+        .upload-bar { display: flex; align-items: center; gap: 14px; }
+        .upload-bar label { font-size: 12px; color: #cbd5e1; font-weight: 500; display: flex; align-items: center; gap: 4px; }
+        input[type="file"] { 
+            background: #1e293b; 
+            color: #f8fafc; 
+            padding: 4px 8px; 
+            border-radius: 4px; 
+            font-size: 11px; 
+            border: 1px solid #334155; 
+            cursor: pointer; 
+        }
 
-        .main-layout { display: flex; flex: 1; height: calc(100vh - 54px); overflow: hidden; }
+        /* ========== 主版面配置 (紅色框：可收折側邊欄與多層級切換) ========== */
+        .main-layout { display: flex; flex: 1; height: calc(100vh - 54px); position: relative; overflow: hidden; }
 
         #sidebar {
-            width: 360px;
+            width: 380px;
+            min-width: 380px;
             background: #ffffff;
             border-right: 1px solid #e2e8f0;
             display: flex;
             flex-direction: column;
-            box-shadow: 2px 0 8px rgba(0,0,0,0.04);
+            box-shadow: 2px 0 10px rgba(0,0,0,0.05);
             z-index: 999;
-            position: relative; 
+            position: relative;
+            transition: margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
+        #sidebar.collapsed {
+            margin-left: -380px;
+        }
+
+        /* 側邊欄頂部 Tab 切換列 (多層級頁面控制) */
+        .sidebar-tabs {
+            display: flex;
+            background: #f1f5f9;
+            border-bottom: 1px solid #cbd5e1;
+        }
+        .tab-btn {
+            flex: 1;
+            padding: 10px 8px;
+            font-size: 12px;
+            font-weight: 600;
+            border: none;
+            background: transparent;
+            color: #64748b;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            transition: all 0.2s;
+            border-bottom: 2px solid transparent;
+        }
+        .tab-btn:hover { background: #e2e8f0; color: #1e293b; }
+        .tab-btn.active {
+            color: #0284c7;
+            background: #ffffff;
+            border-bottom: 2px solid #0284c7;
+        }
+
+        /* Tab 1: 行程車次管理面版 */
+        #tab-trips-content {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        /* Tab 2: 行程時間系統面板 (綠色框) */
+        #tab-timeline-content {
+            display: none;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+            background: #f8fafc;
+        }
+        #tab-timeline-content.active { display: flex; }
+
         .sidebar-header {
             padding: 12px 16px;
             border-bottom: 1px solid #e2e8f0;
-            background: #f8fafc;
+            background: #ffffff;
         }
         .sidebar-header h3 { font-size: 14px; font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
-        .batch-actions { display: flex; gap: 8px; align-items: center; }
-        .btn-mini { background: #e2e8f0; border: none; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; color: #334155; }
-        .btn-mini:hover { background: #cbd5e1; }
+        .batch-actions { display: flex; gap: 6px; align-items: center; }
+        .btn-mini { background: #f1f5f9; border: 1px solid #cbd5e1; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; color: #334155; }
+        .btn-mini:hover { background: #e2e8f0; }
 
         .action-buttons {
             display: flex;
             gap: 8px;
             margin-top: 8px;
         }
-
         .btn-run {
             background: #0284c7;
             color: #fff;
@@ -67,7 +162,7 @@
             flex: 2;
             padding: 8px 12px;
             border-radius: 6px;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
             cursor: pointer;
             display: flex;
@@ -79,15 +174,14 @@
         .btn-run:hover { background: #0369a1; }
         .btn-run:disabled { background: #94a3b8; cursor: not-allowed; }
 
-        /* 【新增】清除按鈕樣式 */
         .btn-clear {
-            background: #f1f5f9;
+            background: #f8fafc;
             color: #475569;
             border: 1px solid #cbd5e1;
             flex: 1;
             padding: 8px 12px;
             border-radius: 6px;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
             cursor: pointer;
             display: flex;
@@ -95,13 +189,13 @@
             justify-content: center;
             transition: all 0.2s;
         }
-        .btn-clear:hover { background: #e2e8f0; color: #0f172a; border-color: #94a3b8; }
+        .btn-clear:hover { background: #e2e8f0; color: #0f172a; }
         .btn-clear:disabled { background: #f8fafc; color: #cbd5e1; border-color: #e2e8f0; cursor: not-allowed; }
 
         .progress-bar-container {
             width: 100%;
             background: #e2e8f0;
-            height: 6px;
+            height: 5px;
             border-radius: 3px;
             margin-top: 8px;
             overflow: hidden;
@@ -123,21 +217,21 @@
             position: absolute;
             bottom: 20px;
             right: 20px;
-            width: 38px;
-            height: 38px;
+            width: 36px;
+            height: 36px;
             background: #0284c7;
             color: #ffffff;
             border: none;
             border-radius: 50%;
-            font-size: 16px;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            font-size: 15px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             opacity: 0;
             visibility: hidden;
-            transition: opacity 0.3s, visibility 0.3s, transform 0.2s, background 0.2s;
+            transition: all 0.2s ease;
             z-index: 1000;
         }
         .scroll-to-top-btn.visible { opacity: 1; visibility: visible; }
@@ -148,48 +242,200 @@
             border-radius: 8px; 
             background: #ffffff; 
             overflow: hidden; 
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05); 
+            box-shadow: 0 1px 3px rgba(0,0,0,0.03); 
             flex-shrink: 0; 
         }
-        .date-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: #f1f5f9; cursor: pointer; user-select: none; border-bottom: 1px solid #e2e8f0; }
+        .date-header { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; background: #f1f5f9; cursor: pointer; user-select: none; border-bottom: 1px solid #e2e8f0; }
         .date-header:hover { background: #e2e8f0; }
-        .date-title-group { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; color: #0f172a; }
+        .date-title-group { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: #0f172a; }
         .date-content { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; background: #ffffff; }
-        
         .date-content.hidden { display: none !important; }
-        
         .toggle-icon { font-size: 10px; transition: transform 0.2s; color: #64748b; }
         .toggle-icon.collapsed { transform: rotate(-90deg); }
 
-        .trip-card { border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; background: #f8fafc; transition: box-shadow 0.2s, border-color 0.2s; }
-        .trip-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-        .trip-title-group { display: flex; align-items: center; gap: 8px; }
-        .trip-color-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
-        .trip-id { font-size: 13px; font-weight: 700; color: #0f172a; }
-        .badge-count { font-size: 11px; padding: 1px 6px; border-radius: 10px; background: #e0f2fe; color: #0369a1; font-weight: 600; }
-        .trip-stats { display: flex; gap: 10px; font-size: 11px; color: #64748b; margin-bottom: 6px; background: #ffffff; border: 1px solid #e2e8f0; padding: 4px 6px; border-radius: 4px; }
-        .depot-select-row { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: #475569; }
-        .depot-select-row select { font-size: 11px; padding: 2px 4px; border-radius: 4px; border: 1px solid #cbd5e1; max-width: 170px; }
+        /* ========== 紫色框：更詳細的車次卡片 (高度還原 PPT 簡潔樣式) ========== */
+        .trip-card { 
+            border: 1px solid #e2e8f0; 
+            border-radius: 6px; 
+            padding: 10px; 
+            background: #ffffff; 
+            box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+            transition: all 0.2s; 
+        }
+        .trip-card:hover { border-color: #bae6fd; box-shadow: 0 2px 6px rgba(2, 132, 199, 0.08); }
+        .trip-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .trip-title-group { display: flex; align-items: center; gap: 6px; }
+        .trip-color-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+        .trip-id { font-size: 13px; font-weight: 700; color: #1e293b; }
+        .badge-count { font-size: 11px; padding: 2px 6px; border-radius: 10px; background: #e0f2fe; color: #0284c7; font-weight: 600; }
+        
+        .trip-stats-box { 
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 11px; 
+            color: #64748b; 
+            margin-bottom: 8px; 
+            background: #ffffff; 
+            border: 1px solid #e2e8f0; 
+            padding: 5px 8px; 
+            border-radius: 4px; 
+        }
+        .trip-stat-item { display: flex; align-items: center; gap: 4px; }
+        
+        .depot-select-row { display: flex; align-items: center; font-size: 11px; color: #475569; }
+        .depot-select-row span { margin-right: 2px; }
+        .depot-select-row select { 
+            flex: 1;
+            font-size: 11px; 
+            padding: 4px 6px; 
+            border-radius: 4px; 
+            border: 1px solid #cbd5e1; 
+            background: #fff; 
+            color: #1e293b;
+            cursor: pointer;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .depot-select-row select:focus { border-color: #0284c7; }
 
+        .trip-time-badge {
+            background: #ecfdf5;
+            color: #065f46;
+            border: 1px solid #a7f3d0;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 8px;
+        }
+
+        /* ========== 綠色框：行程時間系統 (時序流 / 點-箭頭-點) ========== */
+        .timeline-header-bar {
+            padding: 10px 14px;
+            background: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .timeline-header-bar label { font-size: 12px; font-weight: 700; color: #1e293b; }
+        .timeline-header-bar select { font-size: 12px; padding: 4px 8px; border-radius: 4px; border: 1px solid #cbd5e1; max-width: 220px; }
+
+        .timeline-flow-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0;
+        }
+
+        /* 節點樣式 (圓點) */
+        .timeline-node {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 10px 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+            z-index: 2;
+            position: relative;
+        }
+        .timeline-node.depot {
+            background: #fef2f2;
+            border-color: #fecaca;
+        }
+        .node-dot {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+            color: #ffffff;
+            flex-shrink: 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+        }
+        .node-content { flex: 1; min-width: 0; }
+        .node-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
+        .node-title { font-size: 13px; font-weight: 700; color: #0f172a; }
+        .node-badge-merged { font-size: 10px; background: #fef3c7; color: #92400e; padding: 1px 6px; border-radius: 10px; font-weight: 600; border: 1px solid #fde68a; }
+        .node-addr { font-size: 11px; color: #475569; word-break: break-all; margin-bottom: 4px; }
+        .node-orders-list { font-size: 10px; color: #64748b; background: #f8fafc; padding: 4px 6px; border-radius: 4px; border: 1px dashed #cbd5e1; }
+
+        /* 箭頭樣式 (依需求：現階段以綠色為主) */
+        .timeline-arrow-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 6px 0;
+            position: relative;
+            margin-left: 20px;
+        }
+        .timeline-arrow-line {
+            width: 3px;
+            height: 24px;
+            background: #16a34a; /* 綠色箭頭線條 */
+        }
+        .timeline-arrow-badge {
+            background: #dcfce7;
+            color: #15803d;
+            border: 1px solid #86efac;
+            padding: 3px 10px;
+            border-radius: 14px;
+            font-size: 11px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+            margin: 2px 0;
+        }
+        .timeline-arrow-street { font-size: 10px; color: #166534; font-weight: normal; }
+        .timeline-arrow-head {
+            width: 0; 
+            height: 0; 
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-top: 8px solid #16a34a; /* 綠色箭頭尖端 */
+        }
+
+        /* 預留橘黃色與紅色樣式類 (未來加入時可直接切換) */
+        .timeline-arrow-wrap.orange .timeline-arrow-line { background: #ea580c; }
+        .timeline-arrow-wrap.orange .timeline-arrow-head { border-top-color: #ea580c; }
+        .timeline-arrow-wrap.orange .timeline-arrow-badge { background: #ffedd5; color: #c2410c; border-color: #fdba74; }
+
+        .timeline-arrow-wrap.red .timeline-arrow-line { background: #dc2626; }
+        .timeline-arrow-wrap.red .timeline-arrow-head { border-top-color: #dc2626; }
+        .timeline-arrow-wrap.red .timeline-arrow-badge { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+
+        /* 地圖區域 */
         #map { flex: 1; height: 100%; position: relative; }
         .stop-popup { font-size: 12px; line-height: 1.6; min-width: 230px; }
         .stop-popup-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; }
         .prop-item { margin: 2px 0; color: #334155; }
-        .action-row { margin-top: 8px; padding-top: 6px; border-top: 1px dashed #cbd5e1; display: flex; flex-direction: column; gap: 5px; }
-        .btn-popup-cancel { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 4px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
-        .btn-popup-restore { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; padding: 4px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
-        .transfer-group { display: flex; gap: 4px; }
-        .transfer-group select { flex: 1; font-size: 11px; }
-        .transfer-group button { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; padding: 3px 6px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; }
         .stop-seq-label { color: #ffffff; border-radius: 10px; padding: 1px 6px; font-size: 11px; font-weight: 600; border: 1px solid #ffffff; box-shadow: 0 1px 4px rgba(0,0,0,0.3); white-space: nowrap; }
     </style>
 </head>
 <body>
 
+    <!-- 頂部導覽列 (藍色框) -->
     <header>
-        <div class="header-title">
-            <h2>智慧物流動態排程與調度系統</h2>
-            <span>多日行程佇列運算、欄位智能分類與局部熱更新</span>
+        <div class="header-left">
+            <button id="btn-sidebar-toggle" class="btn-hamburger" onclick="toggleSidebar()" title="收起/展開側邊功能欄">☰</button>
+            <div class="header-title">
+                <h2>智慧物流動態排程與調度系統</h2>
+                <span>多日行程佇列運算、道路車速時間估算與同址合併</span>
+            </div>
         </div>
         <div class="upload-bar">
             <div>
@@ -204,34 +450,57 @@
     </header>
 
     <div class="main-layout">
+        <!-- 側邊欄 (紅色框：可折疊面板與多層級 Tab) -->
         <div id="sidebar">
-            <div class="sidebar-header">
-                <h3>
-                    <span>行程車次管理</span>
-                    <div class="batch-actions">
-                        <button class="btn-mini" onclick="toggleSelectAll(true)">全選</button>
-                        <button class="btn-mini" onclick="toggleSelectAll(false)">全不選</button>
-                    </div>
-                </h3>
-                <span id="summary-meta" style="font-size: 11px; color: #64748b;">請上傳檔案載入資料...</span>
-                
-                <div class="action-buttons">
-                    <button id="btn-execute" class="btn-run" onclick="runQueueOptimization()" disabled>🚀 執行計算並輸出</button>
-                    <!-- 【新增】清除按鈕 -->
-                    <button id="btn-clear" class="btn-clear" onclick="clearAllRoutes()" disabled>🧹 清除路線</button>
-                </div>
-                
-                <div id="progress-bar-wrap" class="progress-bar-container">
-                    <div id="progress-bar" class="progress-bar-inner"></div>
-                </div>
-            </div>
-            
-            <div id="trip-list">
-                <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">尚未載入單號資料</div>
+            <div class="sidebar-tabs">
+                <button id="tab-btn-trips" class="tab-btn active" onclick="switchTab('trips')">📋 行程車次管理</button>
+                <button id="tab-btn-timeline" class="tab-btn" onclick="switchTab('timeline')">⏱️ 行程時間系統</button>
             </div>
 
-            <button id="scrollTopBtn" class="scroll-to-top-btn" onclick="scrollToTop()" title="回到最頂部">⬆️</button>
+            <!-- Tab 1: 行程車次管理 -->
+            <div id="tab-trips-content">
+                <div class="sidebar-header">
+                    <h3>
+                        <span>車次分組清單</span>
+                        <div class="batch-actions">
+                            <button class="btn-mini" onclick="toggleSelectAll(true)">全選</button>
+                            <button class="btn-mini" onclick="toggleSelectAll(false)">全不選</button>
+                        </div>
+                    </h3>
+                    <span id="summary-meta" style="font-size: 11px; color: #64748b;">請上傳檔案載入資料...</span>
+                    
+                    <div class="action-buttons">
+                        <button id="btn-execute" class="btn-run" onclick="runQueueOptimization()" disabled>🚀 執行計算並輸出</button>
+                        <button id="btn-clear" class="btn-clear" onclick="clearAllRoutes()" disabled>🧹 清除路線</button>
+                    </div>
+                    
+                    <div id="progress-bar-wrap" class="progress-bar-container">
+                        <div id="progress-bar" class="progress-bar-inner"></div>
+                    </div>
+                </div>
+                
+                <div id="trip-list">
+                    <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">尚未載入單號資料</div>
+                </div>
+
+                <button id="scrollTopBtn" class="scroll-to-top-btn" onclick="scrollToTop()" title="回到最頂部">⬆️</button>
+            </div>
+
+            <!-- Tab 2: 行程時間系統 (綠色框) -->
+            <div id="tab-timeline-content">
+                <div class="timeline-header-bar">
+                    <label>🚗 選擇已計算車次：</label>
+                    <select id="timeline-trip-select" onchange="renderTimelineView()"></select>
+                </div>
+                <div id="timeline-flow-list" class="timeline-flow-list">
+                    <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">
+                        請先勾選車次並執行計算以產生行程時間鏈
+                    </div>
+                </div>
+            </div>
         </div>
+
+        <!-- 右側 Leaflet 地圖 -->
         <div id="map"></div>
     </div>
 
@@ -257,13 +526,33 @@
 
         const tripListEl = document.getElementById('trip-list');
         const scrollTopBtn = document.getElementById('scrollTopBtn');
+        const sidebar = document.getElementById('sidebar');
+
+        // 藍色框：漢堡按鈕切換側邊欄收折
+        function toggleSidebar() {
+            sidebar.classList.toggle('collapsed');
+            setTimeout(() => { map.invalidateSize(); }, 350);
+        }
+
+        // 紅色框：多層級 Tab 切換
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            if (tabId === 'trips') {
+                document.getElementById('tab-btn-trips').classList.add('active');
+                document.getElementById('tab-trips-content').style.display = 'flex';
+                document.getElementById('tab-timeline-content').style.display = 'none';
+            } else {
+                document.getElementById('tab-btn-timeline').classList.add('active');
+                document.getElementById('tab-trips-content').style.display = 'none';
+                document.getElementById('tab-timeline-content').style.display = 'flex';
+                updateTimelineTripOptions();
+                renderTimelineView();
+            }
+        }
 
         tripListEl.addEventListener('scroll', () => {
-            if (tripListEl.scrollTop > 150) {
-                scrollTopBtn.classList.add('visible');
-            } else {
-                scrollTopBtn.classList.remove('visible');
-            }
+            if (tripListEl.scrollTop > 150) scrollTopBtn.classList.add('visible');
+            else scrollTopBtn.classList.remove('visible');
         });
 
         function scrollToTop() {
@@ -358,7 +647,6 @@
             tripStore = {};
             let colorIdx = 0;
             const usedCoords = new Set(); 
-
             expandedDates.clear();
 
             rows.forEach((r, idx) => {
@@ -375,7 +663,6 @@
 
                 const dateVal = dateCol && r[dateCol] ? String(r[dateCol]) : '未分類日期';
                 const orderId = String(r[orderCol] || '未分類行程');
-                
                 const tripKey = `${dateVal}_${orderId}`;
 
                 if (!tripStore[tripKey]) {
@@ -384,8 +671,12 @@
                         date: dateVal,
                         order_id: orderId,
                         color: COLOR_PALETTE[colorIdx % COLOR_PALETTE.length],
-                        assigned_depot: null, stops: [],
-                        is_selected: true, is_visible: true, is_computed: false
+                        assigned_depot: null, 
+                        stops: [],
+                        is_selected: true, 
+                        is_visible: true, 
+                        is_computed: false,
+                        route_result: null
                     };
                     colorIdx++;
                 }
@@ -410,6 +701,7 @@
             renderSidebar();
             renderAllMapLayers();
             checkReadyState();
+            updateTimelineTripOptions();
         }
 
         function autoAssignDepots() {
@@ -448,6 +740,7 @@
             if (depotStore.length > 0) map.fitBounds(depotLayer.getBounds().pad(0.1));
         }
 
+        /* ========== 紫色框：渲染更詳細的車次卡片 ========== */
         function renderSidebar() {
             const listEl = document.getElementById('trip-list');
             const trips = Object.values(tripStore);
@@ -462,7 +755,6 @@
             document.getElementById('summary-meta').innerText = `共 ${uniqueDates.size} 天，${trips.length} 個車次，${totalStops} 個站點`;
 
             listEl.innerHTML = '';
-
             const groupedByDate = {};
             trips.forEach(t => {
                 if (!groupedByDate[t.date]) groupedByDate[t.date] = [];
@@ -473,12 +765,10 @@
                 const dateTrips = groupedByDate[date];
                 const allSelected = dateTrips.every(t => t.is_selected);
                 const someSelected = dateTrips.some(t => t.is_selected);
-                
                 const isExpanded = expandedDates.has(date);
 
                 const dateGroup = document.createElement('div');
                 dateGroup.className = 'date-group';
-                
                 dateGroup.innerHTML = `
                     <div class="date-header" data-date="${date}" onclick="toggleDateCollapse(this.getAttribute('data-date'))">
                         <div class="date-title-group">
@@ -494,7 +784,6 @@
 
                 const dateCheckbox = dateGroup.querySelector('input[type="checkbox"]');
                 if (!allSelected && someSelected) dateCheckbox.indeterminate = true;
-
                 const contentEl = dateGroup.querySelector('.date-content');
 
                 dateTrips.forEach(trip => {
@@ -506,6 +795,7 @@
                         `<option value="${d.id}" ${trip.assigned_depot && trip.assigned_depot.id === d.id ? 'selected' : ''}>${d.name}</option>`
                     ).join('');
 
+                    // 紫色框：高度還原簡報中的潔淨樣式 (Icon與並排資訊)
                     const card = document.createElement('div');
                     card.className = 'trip-card';
                     card.innerHTML = `
@@ -518,9 +808,13 @@
                             </div>
                             <span class="badge-count">${activeCount} 站</span>
                         </div>
-                        <div class="trip-stats">
-                            <span>⚖️ ${totalWeight.toFixed(1)} kg</span>
-                            <span>📐 ${totalVol.toFixed(2)} cbm</span>
+                        <div class="trip-stats-box">
+                            <div class="trip-stat-item">
+                                <span style="color:#cbd5e1; font-size: 13px;">⚖️</span> ${totalWeight.toFixed(1)} kg
+                            </div>
+                            <div class="trip-stat-item">
+                                <span style="color:#cbd5e1; font-size: 13px;">📐</span> ${totalVol.toFixed(2)} cbm
+                            </div>
                         </div>
                         <div class="depot-select-row">
                             <span>出發：</span>
@@ -528,6 +822,12 @@
                                 ${depotOptions || '<option>無可用起點</option>'}
                             </select>
                         </div>
+                        ${trip.is_computed && trip.route_result ? `
+                            <div class="trip-time-badge">
+                                <span>⏱️ 預估行駛: <b>${trip.route_result.duration_min} 分鐘</b></span>
+                                <span>🛣️ ${trip.route_result.distance_km} km</span>
+                            </div>
+                        ` : ''}
                     `;
                     contentEl.appendChild(card);
                 });
@@ -537,29 +837,25 @@
         }
 
         function toggleDateCollapse(date) {
-            if (expandedDates.has(date)) {
-                expandedDates.delete(date); 
-            } else {
-                expandedDates.add(date);    
-            }
+            if (expandedDates.has(date)) expandedDates.delete(date);
+            else expandedDates.add(date);
             renderSidebar(); 
         }
 
         function toggleDateSelect(date, checked) {
             Object.values(tripStore).forEach(t => {
-                if (t.date === date) {
-                    t.is_selected = checked;
-                    t.is_visible = checked;
-                }
+                if (t.date === date) { t.is_selected = checked; t.is_visible = checked; }
             });
             renderSidebar();
             renderAllMapLayers();
+            updateTimelineTripOptions();
         }
 
         function toggleSelectAll(select) {
             Object.values(tripStore).forEach(t => { t.is_selected = select; t.is_visible = select; });
             renderSidebar();
             renderAllMapLayers();
+            updateTimelineTripOptions();
         }
 
         function toggleTripSelect(tripKey, checked) {
@@ -568,6 +864,7 @@
                 tripStore[tripKey].is_visible = checked; 
                 renderSidebar(); 
                 renderAllMapLayers(); 
+                updateTimelineTripOptions();
             }
         }
 
@@ -576,25 +873,27 @@
             if (depot && tripStore[tripKey]) {
                 tripStore[tripKey].assigned_depot = { ...depot, is_manual: true };
                 tripStore[tripKey].is_computed = false;
+                renderSidebar();
+                updateTimelineTripOptions();
             }
         }
 
         function checkReadyState() {
             const hasData = Object.keys(tripStore).length > 0 && depotStore.length > 0;
             document.getElementById('btn-execute').disabled = !hasData;
-            document.getElementById('btn-clear').disabled = !hasData; // 控制清除按鈕
+            document.getElementById('btn-clear').disabled = !hasData;
         }
 
-        // 【新增】清除所有計算結果的函式
         function clearAllRoutes() {
             if (!confirm("確定要清除所有地圖上的計算結果嗎？(不會刪除站點資料)")) return;
-            
             Object.values(tripStore).forEach(trip => {
                 trip.is_computed = false;
-                trip.route_result = null; // 清空路線資料
+                trip.route_result = null;
             });
-            
-            renderAllMapLayers(); // 重繪地圖 (只剩原始站點圓點)
+            renderSidebar();
+            renderAllMapLayers();
+            updateTimelineTripOptions();
+            renderTimelineView();
         }
 
         function renderAllMapLayers() {
@@ -615,17 +914,16 @@
                         L.polyline(trip.route_result.polyline, { color: trip.color, weight: 5, opacity: 0.8 }).addTo(layerGroup);
                     }
                     if (trip.route_result.sequence) {
-                        let stopSeqCounter = 1;
                         trip.route_result.sequence.forEach(seqStop => {
                             if (seqStop.type === 'DEPOT') return;
+                            const labelText = seqStop.is_merged ? `#${seqStop.seq_no} (${seqStop.merged_count}單)` : `#${seqStop.seq_no}`;
                             const seqLabelIcon = L.divIcon({
                                 className: 'stop-label-icon',
-                                html: `<span class="stop-seq-label" style="background:${trip.color};">#${stopSeqCounter}</span>`,
-                                iconSize: [30, 20],
-                                iconAnchor: [15, -6]
+                                html: `<span class="stop-seq-label" style="background:${trip.color};">${labelText}</span>`,
+                                iconSize: [36, 20],
+                                iconAnchor: [18, -6]
                             });
                             L.marker([seqStop.lat, seqStop.lon], { icon: seqLabelIcon }).addTo(layerGroup);
-                            stopSeqCounter++;
                         });
                     }
                 }
@@ -652,64 +950,106 @@
             if (stop.weight_kg) dynamicProps.push(`<div class="prop-item">⚖️ 重量: <b>${stop.weight_kg} kg</b></div>`);
             if (stop.volume_cbm) dynamicProps.push(`<div class="prop-item">📐 材積: <b>${stop.volume_cbm} cbm</b></div>`);
 
-            const otherTripOptions = Object.values(tripStore)
-                .filter(t => t.trip_key !== currentTrip.trip_key)
-                .map(t => `<option value="${t.trip_key}">${t.date} - ${t.order_id}</option>`).join('');
-
             return `
                 <div class="stop-popup">
                     <div class="stop-popup-title" style="color:${currentTrip.color};">${stop.name} (${stop.stop_id})</div>
-                    <div class="prop-item">📅 當前日期: <b>${stop.date}</b></div>
-                    <div class="prop-item">🚗 當前車次: <b>${stop.order_id}</b></div>
+                    <div class="prop-item">📅 日期: <b>${stop.date}</b> | 車次: <b>${stop.order_id}</b></div>
                     <div class="prop-item">📍 地址: ${stop.address || '無'}</div>
                     ${dynamicProps.join('')}
-                    <div class="action-row">
-                        ${isCancelled ? 
-                            `<button class="btn-popup-restore" onclick="restoreStop('${stop.trip_key}', '${stop.stop_id}')">🔄 恢復此站點</button>` :
-                            `<button class="btn-popup-cancel" onclick="cancelStop('${stop.trip_key}', '${stop.stop_id}')">❌ 取消此站點</button>`
-                        }
-                        <div class="transfer-group">
-                            <select id="transfer-select-${stop.stop_id}">${otherTripOptions}</select>
-                            <button onclick="transferStop('${stop.trip_key}', '${stop.stop_id}')">🤝 轉單</button>
-                        </div>
-                    </div>
                 </div>
             `;
         }
 
-        function cancelStop(tripKey, stopId) {
-            const stop = tripStore[tripKey].stops.find(s => s.stop_id === stopId);
-            if (stop) { stop.status = 'CANCELLED'; tripStore[tripKey].is_computed = false; renderSidebar(); renderAllMapLayers(); map.closePopup(); }
-        }
-
-        function restoreStop(tripKey, stopId) {
-            const stop = tripStore[tripKey].stops.find(s => s.stop_id === stopId);
-            if (stop) { stop.status = 'ACTIVE'; tripStore[tripKey].is_computed = false; renderSidebar(); renderAllMapLayers(); map.closePopup(); }
-        }
-
-        function transferStop(fromTripKey, stopId) {
-            const selectEl = document.getElementById(`transfer-select-${stopId}`);
-            if (!selectEl) return;
+        /* ========== 綠色框：行程時間系統時序視圖 ========== */
+        function updateTimelineTripOptions() {
+            const selectEl = document.getElementById('timeline-trip-select');
+            const computedTrips = Object.values(tripStore).filter(t => t.is_computed && t.route_result);
             
-            const targetTripKey = selectEl.value;
-            const fromTrip = tripStore[fromTripKey];
-            const toTrip = tripStore[targetTripKey];
-            if (!fromTrip || !toTrip) return;
+            selectEl.innerHTML = '';
+            if (computedTrips.length === 0) {
+                selectEl.innerHTML = '<option value="">尚無已計算車次</option>';
+                return;
+            }
 
-            const stopIdx = fromTrip.stops.findIndex(s => s.stop_id === stopId);
-            if (stopIdx === -1) return;
-
-            const [transferredStop] = fromTrip.stops.splice(stopIdx, 1);
-            transferredStop.trip_key = targetTripKey;
-            transferredStop.date = toTrip.date;
-            transferredStop.order_id = toTrip.order_id;
-            transferredStop.status = 'ACTIVE';
-            toTrip.stops.push(transferredStop);
-
-            fromTrip.is_computed = false; toTrip.is_computed = false;
-            renderSidebar(); renderAllMapLayers(); map.closePopup();
+            computedTrips.forEach(t => {
+                const opt = document.createElement('option');
+                opt.value = t.trip_key;
+                opt.innerText = `[${t.date}] ${t.order_id} (${t.route_result.sequence.length - 1} 站點)`;
+                selectEl.appendChild(opt);
+            });
         }
 
+        function renderTimelineView() {
+            const selectEl = document.getElementById('timeline-trip-select');
+            const flowContainer = document.getElementById('timeline-flow-list');
+            const selectedTripKey = selectEl.value;
+            const trip = tripStore[selectedTripKey];
+
+            if (!trip || !trip.route_result || !trip.route_result.sequence) {
+                flowContainer.innerHTML = `
+                    <div style="text-align: center; color: #94a3b8; font-size: 12px; margin-top: 40px;">
+                        請先勾選車次並執行計算以產生行程時間鏈
+                    </div>
+                `;
+                return;
+            }
+
+            flowContainer.innerHTML = '';
+            const seq = trip.route_result.sequence;
+            const legs = trip.route_result.legs || [];
+
+            seq.forEach((item, index) => {
+                // 1. 站點節點 (圓點)
+                const nodeEl = document.createElement('div');
+                nodeEl.className = `timeline-node ${item.type === 'DEPOT' ? 'depot' : ''}`;
+
+                if (item.type === 'DEPOT') {
+                    nodeEl.innerHTML = `
+                        <div class="node-dot" style="background: #dc2626;">🚩</div>
+                        <div class="node-content">
+                            <div class="node-title-row">
+                                <span class="node-title">出發點：${item.name}</span>
+                            </div>
+                            <div class="node-addr">代碼: ${item.id}</div>
+                        </div>
+                    `;
+                } else {
+                    const orderIds = item.orders.map(o => o.stop_id).join(', ');
+                    nodeEl.innerHTML = `
+                        <div class="node-dot" style="background: ${trip.color};">#${item.seq_no}</div>
+                        <div class="node-content">
+                            <div class="node-title-row">
+                                <span class="node-title">站點號碼: ${item.stop_id}</span>
+                                ${item.is_merged ? `<span class="node-badge-merged">同址合併 ${item.merged_count} 單</span>` : ''}
+                            </div>
+                            <div class="node-addr">📍 ${item.address || '無地址資料'}</div>
+                            ${item.is_merged ? `<div class="node-orders-list">包含單號：${orderIds}</div>` : ''}
+                        </div>
+                    `;
+                }
+                flowContainer.appendChild(nodeEl);
+
+                // 2. 節點間的連接箭頭 (依需求：現階段以綠色為主)
+                if (index < legs.length) {
+                    const leg = legs[index];
+                    const arrowEl = document.createElement('div');
+                    // 綠色箭頭線條，架構預留 orange / red
+                    arrowEl.className = 'timeline-arrow-wrap';
+                    arrowEl.innerHTML = `
+                        <div class="timeline-arrow-line"></div>
+                        <div class="timeline-arrow-badge">
+                            <span>⏱️ 預估行駛: ${leg.duration_min} 分鐘</span>
+                            <span>(${leg.distance_km} km)</span>
+                            <span class="timeline-arrow-street">🛣️ ${leg.main_street}</span>
+                        </div>
+                        <div class="timeline-arrow-head"></div>
+                    `;
+                    flowContainer.appendChild(arrowEl);
+                }
+            });
+        }
+
+        /* ========== 執行排程與道路車速最佳化 ========== */
         async function runQueueOptimization() {
             const selectedTrips = Object.values(tripStore).filter(t => t.is_selected);
             if (selectedTrips.length === 0) return alert("請至少勾選一個車次進行計算！");
@@ -739,28 +1079,40 @@
                             stops: activeStops 
                         };
                         const resp = await fetch("http://127.0.0.1:8000/api/optimize-single-trip", {
-                            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+                            method: "POST", 
+                            headers: { "Content-Type": "application/json" }, 
+                            body: JSON.stringify(payload)
                         });
 
                         if (resp.ok) {
                             const result = await resp.json();
                             trip.route_result = {
-                                distance_km: result.total_distance_km, duration_min: result.estimated_duration_min,
-                                polyline: result.polyline, sequence: result.sequence
+                                distance_km: result.total_distance_km, 
+                                duration_min: result.estimated_duration_min,
+                                polyline: result.polyline, 
+                                sequence: result.sequence,
+                                legs: result.legs
                             };
                             trip.is_computed = true;
                         }
-                    } catch (err) { console.error(`車次 ${trip.trip_key} 計算失敗:`, err); }
+                    } catch (err) { 
+                        console.error(`車次 ${trip.trip_key} 計算失敗:`, err); 
+                    }
                 }
-                await new Promise(r => setTimeout(r, 150)); 
+                await new Promise(r => setTimeout(r, 120)); 
             }
+
             runBtn.innerText = "🚀 執行計算並輸出";
             runBtn.disabled = false; 
             clearBtn.disabled = false;
             progressWrap.style.display = 'none';
+            renderSidebar();
             renderAllMapLayers();
-            alert("所有選取車次路徑計算完成！");
+            updateTimelineTripOptions();
+            renderTimelineView();
+            alert("所有選取車次路徑與預估時間計算完成！可切換至「行程時間系統」檢視時序流程。");
         }
     </script>
 </body>
 </html>
+```eof
