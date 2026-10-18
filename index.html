@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智慧物流動態排程與調度系統</title>
+    <link rel="icon" href="data:,">
 
     <!-- Leaflet CSS & JS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -503,6 +504,9 @@
         .vd-sim-btn.active { background: #f59e0b; color: #ffffff; border-color: #f59e0b; }
         .vd-toggle-panel #vd-clear-reroute-btn { margin-top: 6px; width: 100%; font-size: 11px; padding: 3px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f1f5f9; color: #334155; cursor: pointer; }
         .vd-toggle-panel #vd-clear-reroute-btn:hover { background: #e2e8f0; }
+        .vd-toggle-panel #vd-scan-status { margin-top: 4px; font-size: 11px; color: #7c3aed; display: none; }
+        .vd-toggle-panel #vd-scan-status.active { display: block; }
+        .alt-eta-badge { background: rgba(255, 255, 255, 0.92); border: 1px solid #7c3aed; color: #7c3aed; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; white-space: nowrap; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2); }
         .reroute-panel { margin: 4px 0 8px 28px; padding: 6px 8px; background: #f5f3ff; border: 1px solid #c4b5fd; border-radius: 6px; font-size: 11px; color: #5b21b6; }
         .reroute-title { font-weight: 700; margin-bottom: 4px; }
         .reroute-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
@@ -641,7 +645,8 @@
             const div = L.DomUtil.create('div', 'vd-toggle-panel');
             div.innerHTML = '<label><input type="checkbox" id="vd-toggle-uncovered"' + (showUncoveredVd ? ' checked' : '') + ' /> 顯示未覆蓋 VD</label>'
                 + '<button type="button" id="vd-clear-sim-btn">清除模擬</button>'
-                + '<button type="button" id="vd-clear-reroute-btn">清除改道</button>';
+                + '<button type="button" id="vd-clear-reroute-btn">清除改道</button>'
+                + '<div id="vd-scan-status"></div>';
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
             return div;
@@ -1227,6 +1232,19 @@
 
         /* ========== 改道系統：掃描/繪製/套用/清除 ========== */
         const rerouteScanTimers = {};
+        let rerouteScanPending = 0;
+
+        function updateRerouteScanStatus() {
+            const el = document.getElementById('vd-scan-status');
+            if (!el) return;
+            if (rerouteScanPending > 0) {
+                el.textContent = `改道掃描中…(${rerouteScanPending})`;
+                el.classList.add('active');
+            } else {
+                el.textContent = '';
+                el.classList.remove('active');
+            }
+        }
 
         function pathPointAt(path, cum, d) {
             if (!path || path.length < 2 || !cum || cum.length !== path.length) return null;
@@ -1303,6 +1321,8 @@
                 duration_min: l.duration_min || 0,
                 base_duration_min: (l.base_duration_min != null) ? l.base_duration_min : l.duration_min
             }));
+            rerouteScanPending++;
+            updateRerouteScanStatus();
             try {
                 const resp = await fetch('http://127.0.0.1:8000/api/route/alternatives', {
                     method: 'POST',
@@ -1318,13 +1338,21 @@
                         legs: legs
                     })
                 });
-                if (!resp.ok) return;
+                if (!resp.ok) {
+                    console.error(`改道查詢失敗: HTTP ${resp.status} (${trip.trip_key})`);
+                    return;
+                }
                 const data = await resp.json();
                 trip.rerouteOptions = (data.legs || []).filter(x => !(trip.appliedReroutes && trip.appliedReroutes[x.leg_index]));
+                const altCount = (trip.rerouteOptions || []).reduce((s, x) => s + (x.alternatives || []).length, 0);
+                console.log(`改道掃描完成 (${trip.trip_key})：${trip.rerouteOptions.length} 條 leg 有建議，共 ${altCount} 條備選`);
                 renderAllMapLayers();
                 renderTimelineView();
             } catch (err) {
                 console.error('改道查詢失敗:', err);
+            } finally {
+                rerouteScanPending = Math.max(0, rerouteScanPending - 1);
+                updateRerouteScanStatus();
             }
         }
 
@@ -1407,19 +1435,23 @@
                     (trip.rerouteOptions || []).forEach(item => {
                         (item.alternatives || []).forEach((alt, ai) => {
                             if (!alt.seg_polyline || alt.seg_polyline.length < 2) return;
-                            const altColor = (alt.saved_min < 0) ? '#94a3b8' : (ai === 0 ? '#7c3aed' : '#2563eb');
-                            const savedTxt = (alt.saved_min < 0) ? `多 ${Math.abs(alt.saved_min).toFixed(1)} 分` : `省 ${alt.saved_min.toFixed(1)} 分`;
-                            const segTxt = `Leg ${item.leg_index + 1} 壅塞段：原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選 ${alt.alt_p1p2_min} 分（${savedTxt}）`;
                             L.polyline(alt.seg_polyline, {
-                                color: altColor, weight: 4, opacity: 0.85, dashArray: '8,6'
+                                color: '#7c3aed', weight: 4, opacity: 0.85, dashArray: '8,6'
                             }).addTo(layerGroup)
-                                .bindTooltip(segTxt, { sticky: true });
+                                .bindTooltip(`Leg ${item.leg_index + 1} 備選${ai + 1}：壅塞段原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選 ${alt.alt_p1p2_min} 分 ｜ 整趟 ${item.current_eta_min} → ${alt.eta_min} 分`, { sticky: true });
+                            const midPt = alt.seg_polyline[Math.floor(alt.seg_polyline.length / 2)];
+                            if (midPt) {
+                                L.marker(midPt, {
+                                    icon: L.divIcon({ className: '', html: `<div class="alt-eta-badge">${alt.alt_p1p2_min}分</div>`, iconSize: [52, 18], iconAnchor: [26, 9] }),
+                                    interactive: false
+                                }).addTo(layerGroup);
+                            }
                             if (alt.exit_at) {
-                                L.circleMarker(alt.exit_at, { radius: 6, color: altColor, fillColor: '#ffffff', fillOpacity: 1, weight: 2 })
+                                L.circleMarker(alt.exit_at, { radius: 6, color: '#7c3aed', fillColor: '#ffffff', fillOpacity: 1, weight: 2 })
                                     .bindTooltip('建議提早改道點').addTo(layerGroup);
                             }
                             if (alt.rejoin_at) {
-                                L.circleMarker(alt.rejoin_at, { radius: 6, color: altColor, fillColor: altColor, fillOpacity: 0.5, weight: 2 })
+                                L.circleMarker(alt.rejoin_at, { radius: 6, color: '#7c3aed', fillColor: '#7c3aed', fillOpacity: 0.5, weight: 2 })
                                     .bindTooltip('建議回歸點').addTo(layerGroup);
                             }
                         });
