@@ -105,6 +105,39 @@ def classify_vd_color(speed: Optional[float]) -> str:
     return "GRAY"
 
 
+def _road_name_at(segments: List[List[Any]], s: float) -> str:
+    """取沿線里程 s 所在（或最近）路段的街名；無資料回空字串。"""
+    if not segments:
+        return ""
+    for a, b, name in segments:
+        if a <= s <= b:
+            return str(name)
+    # 投影點落在區間縫隙（如幾何斷點）時取最近者
+    best_name = ""
+    best_dist = float("inf")
+    for a, b, name in segments:
+        d = a - s if s < a else (s - b if s > b else 0.0)
+        if d < best_dist:
+            best_dist = d
+            best_name = str(name)
+    return best_name if best_dist <= 30.0 else ""
+
+
+def _road_name_compatible(vd_name: str, seg_name: str) -> bool:
+    """VD 路名與路線路段名是否相容（防陸橋吃到下方道路偵測器）。
+
+    - 任一為空 → 相容（退回純距離比對，不誤殺）
+    - 去空白後完全相等，或一方為另一方前綴 → 相容
+      （如『中山路』↔『中山路二段』、『市民大道』↔『市民大道三段』）
+    - 其餘（『中山路二段』↔『中山路三段』、『中正路』↔『中山路』）→ 不相容
+    """
+    a = str(vd_name or "").strip().replace(" ", "")
+    b = str(seg_name or "").strip().replace(" ", "")
+    if not a or not b:
+        return True
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
 def _project_point_to_path(pt_lat: float, pt_lon: float,
                            path: List[List[float]], cum: List[float]) -> Tuple[float, float]:
     """將點投影到折線上，回傳 (最近水平距離 m, 沿線累積里程 m)。"""
@@ -192,6 +225,7 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
     cum = profile.get("cum") or []
     turns = profile.get("turn_boundaries") or []
     leg_bounds = profile.get("leg_boundaries") or []
+    road_segs = profile.get("road_segments") or []
     points: List[Dict[str, Any]] = []
     coverage: List[Dict[str, Any]] = []
     if len(path) < 2 or not cities:
@@ -220,6 +254,9 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
             level_label = entry.get("level_name") if entry else ""
             levels = entry.get("levels") if entry else None
             on_route = off <= COVERAGE_THRESHOLD_M
+            # 路名比對：距離合格後再比街名，防止陸橋路線吃到下方道路的 VD
+            if on_route and road_segs:
+                on_route = _road_name_compatible(vd.get("RoadName", ""), _road_name_at(road_segs, s))
 
             points.append({
                 "vdid": vdid,
@@ -420,7 +457,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             "total_distance_km": 0,
             "total_duration_min": 0,
             "legs": [],
-            "profile": {"path": [], "cum": [], "turn_boundaries": [], "leg_boundaries": []}
+            "profile": {"path": [], "cum": [], "turn_boundaries": [], "leg_boundaries": [], "road_segments": []}
         }
 
     # OSRM Route 支援最多約 80~100 點，開啟 steps=true 以獲取街道名稱與各步細節
@@ -444,6 +481,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
                 prof_cum: List[float] = [0.0]
                 turn_boundaries: List[float] = []
                 leg_boundaries: List[float] = []
+                road_segments: List[List[Any]] = []  # [起m, 終m, 街名]（供 VD 路名比對）
 
                 def _append_prof(lat: float, lng: float):
                     if prof_path:
@@ -467,6 +505,8 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
                         if st_name and st_name not in street_names:
                             street_names.append(st_name)
 
+                        seg_start_m = prof_cum[-1]
+
                         # 進入此 step 若為轉彎，記錄轉彎邊界（累積里程）
                         if prof_path and is_turn_step(step):
                             turn_boundaries.append(prof_cum[-1])
@@ -474,6 +514,11 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
                         # 累積此 step 的幾何點
                         for pt in (step.get("geometry") or {}).get("coordinates", []):
                             _append_prof(pt[1], pt[0])
+
+                        # 街名區間（供 VD 路名比對；ref 可補名稱不足，如台61線）
+                        seg_name = st_name or st_ref
+                        if seg_name and prof_cum[-1] > seg_start_m:
+                            road_segments.append([seg_start_m, prof_cum[-1], seg_name])
 
                         # 判定道路類型並取得速限上限 (大道路為 60 km/h)
                         rtype = classify_street(st_name, st_ref)
@@ -524,6 +569,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
                         "cum": prof_cum,
                         "turn_boundaries": turn_boundaries,
                         "leg_boundaries": leg_boundaries,
+                        "road_segments": road_segments,
                     },
                 }
     except Exception as e:
@@ -558,7 +604,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
 
     return {
         "geometry": fallback_path,
-        "total_distance_km": round(total_distance_m / 1000.0, 2),
+        "total_distance_km": round(total_dist_m / 1000.0, 2),
         "total_duration_min": round(total_dur_s / 60.0, 1),
         "legs": legs_result,
         "profile": {
@@ -566,6 +612,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             "cum": fb_cum,
             "turn_boundaries": [],
             "leg_boundaries": [fb_cum[-1]] if fb_cum else [],
+            "road_segments": [],
         },
     }
 
