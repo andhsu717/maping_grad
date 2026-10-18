@@ -1482,7 +1482,9 @@
                                 iconSize: [36, 20],
                                 iconAnchor: [18, -6]
                             });
-                            L.marker([seqStop.lat, seqStop.lon], { icon: seqLabelIcon }).addTo(layerGroup);
+                            L.marker([seqStop.lat, seqStop.lon], { icon: seqLabelIcon })
+                                .on('click', (e) => { L.DomEvent.stopPropagation(e); focusTripInTimeline(trip); })
+                                .addTo(layerGroup);
                         });
                     }
 
@@ -1511,6 +1513,7 @@
                         radius: 6, fillColor: markerColor, color: "#ffffff", weight: 1.5, opacity: 1, fillOpacity: isCancelled ? 0.3 : 0.9
                     });
                     marker.bindPopup(() => createStopPopupContent(stop, trip));
+                    marker.on('click', () => focusTripInTimeline(trip));
                     marker.addTo(layerGroup);
                     allBounds.push([stop.lat, stop.lon]);
                 });
