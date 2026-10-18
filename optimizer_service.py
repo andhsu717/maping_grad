@@ -761,7 +761,7 @@ class RouteAlternativesRequest(BaseModel):
 
 @app.post("/api/route/alternatives")
 def route_alternatives(req: RouteAlternativesRequest):
-    """對壅塞 leg 推算提早改道點 (P1) 與回歸點 (P2)，回最多 2 條備用路徑與 ETA。"""
+    """對壅塞 leg 推算提早改道點 (P1) 與回歸點 (P2)，回最多多條備用路徑與 ETA。"""
     path = req.polyline or []
     if len(path) < 2:
         return {"status": "success", "legs": []}
