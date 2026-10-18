@@ -658,7 +658,7 @@ def traffic_live(counties: str = ""):
 # ================= 改道備選路徑 (Phase 3) =================
 REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
 REROUTE_MAX_LEGS = 2           # 每次最多處理的壅塞 leg 數
-REROUTE_ALT_MAX = 2            # 每條 leg 最多候選路徑數
+REROUTE_ALT_MAX = 5            # 每條 leg 最多候選路徑數（OSRM alternatives 請求上限）
 REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢者，供人工比較）
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
 
