@@ -616,7 +616,7 @@
         // VD 車流顏色（與左欄箭頭色票一致）
         const VD_COLORS = { GREEN: '#16a34a', ORANGE: '#ea580c', RED: '#dc2626', GRAY: '#94a3b8' };
         const VD_WARN_COLOR = '#f59e0b';
-        const LIVE_POLL_MS = 30 * 60 * 1000; // 每 30 分鐘更新即時車流
+        const LIVE_POLL_MS = 10 * 60 * 1000; // 每 10 分鐘更新即時車流
         // 官方壅塞等級 1(A)~5(E) 代表速度（無門檻時使用，km/h）
         const VD_LEVEL_FALLBACK_SPEED = { 1: 45, 2: 37, 3: 30, 4: 23, 5: 10 };
         const VD_LEVEL_LABEL = { 1: 'A 順暢', 2: 'B 車多', 3: 'C 壅塞', 4: 'D 嚴重壅塞', 5: 'E 極度壅塞' };
@@ -1794,6 +1794,12 @@
             runBtn.disabled = false; 
             clearBtn.disabled = false;
             progressWrap.style.display = 'none';
+            // 計算完成後先強制重新抓取最新即時車流一次
+            try {
+                await refreshLiveTraffic(true);
+            } catch (e) {
+                console.error('強制刷新即時車流失敗:', e);
+            }
             renderSidebar();
             renderAllMapLayers();
             updateTimelineTripOptions();
@@ -1812,15 +1818,16 @@
             return [...set];
         }
 
-        async function refreshLiveTraffic() {
+        async function refreshLiveTraffic(force = false) {
             const counties = collectActiveCounties();
             if (counties.length === 0) return;
             let vds = {};
             try {
-                const resp = await fetch(`http://127.0.0.1:8000/api/traffic/live?counties=${encodeURIComponent(counties.join(','))}`);
+                const qs = `counties=${encodeURIComponent(counties.join(','))}${force ? '&force=true' : ''}`;
+                const resp = await fetch(`http://127.0.0.1:8000/api/traffic/live?${qs}`);
                 if (!resp.ok) return;
                 const data = await resp.json();
-                vds = data.vds || {};
+                vds = data.vds || data.data || {};
             } catch (err) {
                 console.error('即時車流更新失敗:', err);
                 return;
