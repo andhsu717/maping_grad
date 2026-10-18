@@ -73,33 +73,15 @@ if "!PORT_BUSY!"=="1" (
     exit /b 1
 )
 
-REM ---------- 4.5 OSRM check ----------
-call :is_port_busy !OSRM_PORT!
-if "!PORT_BUSY!"=="1" (
-    echo  [4/5] OSRM is running: 127.0.0.1:!OSRM_PORT!
-    goto osrm_ok
-)
-echo  [4/5] OSRM not running, trying docker start ...
-docker start osrm-routing >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo  [WARNING] OSRM container not found or failed to start.
-    echo          Route calc falls back to straight-line estimate.
-    echo          See osrm_data folder to build OSRM for full features.
-    goto osrm_ok
-)
-set "READY=0"
-for /l %%i in (1,1,15) do (
-    if "!READY!"=="0" (
-        call :is_port_busy !OSRM_PORT!
-        if "!PORT_BUSY!"=="1" ( set "READY=1" ) else ( ping -n 2 127.0.0.1 >nul )
-    )
-)
-if "!READY!"=="1" (
-    echo        OSRM started: 127.0.0.1:!OSRM_PORT!
-) else (
-    echo  [WARNING] OSRM start timeout, route calc degrades.
-)
+REM ---------- 4.5 OSRM check ----------
+call :is_port_busy !OSRM_PORT!
+if "!PORT_BUSY!"=="1" (
+    echo  [OK] OSRM connected: 127.0.0.1:!OSRM_PORT!
+    goto osrm_ok
+)
+echo  [WARN] OSRM not reachable on port !OSRM_PORT!.
+echo         Please start OSRM manually: docker start osrm-routing
+echo         Route calc will degrade to straight-line estimate.
 :osrm_ok
 REM ---------- 5. 啟動後端服務 ----------
 if "!SKIP_BACKEND!"=="1" goto backend_ok
