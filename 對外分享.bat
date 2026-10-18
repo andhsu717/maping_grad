@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
-chcp 950 >nul
-title ´¼¼zª«¬y¨t²Î - ¹ï¥~¤À¨É (ngrok)
+chcp 65001 >nul
+title æ™ºæ…§ç‰©æµç³»çµ± - å°å¤–åˆ†äº« [ngrok]
 cd /d "%~dp0"
 
 set "BACKEND_PORT=8000"
@@ -9,15 +9,11 @@ set "NGROK="
 
 echo.
 echo  ============================================================
-echo     ´¼¼zª«¬y¨t²Î - ¹ï¥~¤À¨É¡]ngrok ¤½¶}ºô§}¡^
+echo     æ™ºæ…§ç‰©æµç³»çµ± - å°å¤–åˆ†äº«ã€ngrok å…¬é–‹ç¶²å€ã€‘
 echo  ============================================================
 echo.
-echo   ¥»µøµ¡ªº¥Î³~¡G§â¹B¦æ¤¤ªº«áºÝ¡A±µ¨ì¤@±ø¦³±K½X«OÅ@ªº¤½¶}ºô§}¡C
-echo   ±Ò°Ê«e¡G½Ð¥ýÂùÀ» ±Ò°Ê¨t²Î.bat¡]«áºÝ¥²¶·¬¡µÛ¡^¡C
-echo   °±¥Î¤è¦¡¡GÃö³¬¥»µøµ¡¡A¤½¶}ºô§}¥ß§Y¥¢®Ä¡C
-echo.
 
-REM ---------- 1. ´M§ä ngrok¡]PATH §ä¤£¨ì®É¦Û°Ê¦^°h¨ì winget ¦w¸Ë¦ì¸m¡^ ----------
+REM ---------- 1. å°‹æ‰¾ ngrok ----------
 where ngrok >nul 2>&1
 if not errorlevel 1 set "NGROK=ngrok"
 
@@ -34,71 +30,65 @@ if not defined NGROK (
 )
 
 if not defined NGROK (
-    echo  [¿ù»~]  §ä¤£¨ì ngrok¡A©|¥¼¦w¸Ë¡C
+    echo  [éŒ¯èª¤] æ‰¾ä¸åˆ° ngrokï¼Œå°šæœªå®‰è£ã€‚
     echo.
-    echo         ½Ð¥HºÞ²z­û PowerShell °õ¦æ:  winget install ngrok.ngrok
-    echo         ©Î¦Ü©xºô¤â°Ê¤U¸ü:  https://ngrok.com/download
+    echo         è«‹ä»¥ç®¡ç†å“¡ PowerShell åŸ·è¡Œ: winget install ngrok.ngrok
+    echo         æˆ–è‡³å®˜ç¶²æ‰‹å‹•ä¸‹è¼‰: https://ngrok.com/download
     echo.
     pause
     exit /b 1
 )
-echo  [1/3] ngrok ¤w§ä¨ì: !NGROK!
+echo  [1/3] ngrok å·²æ‰¾åˆ°: !NGROK!
 
-REM ---------- 2. ÀË¬d authtoken ----------
+REM ---------- 2. æª¢æŸ¥ authtoken ----------
 "!NGROK!" config check >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo  [¿ù»~]  ¥¼³]©w authtoken¡A½Ð¥ýµù¥U ngrok ±b¸¹¨Ã¸j©w¡C
+    echo  [éŒ¯èª¤] æœªè¨­å®š authtokenï¼Œè«‹å…ˆè¨»å†Š ngrok å¸³è™Ÿä¸¦ç¶å®šã€‚
     echo.
-    echo         ¨ú±o token:  https://dashboard.ngrok.com/get-started/your-authtoken
-    echo         ©ó PowerShell °õ¦æ:  ngrok config add-authtoken §AªºToken
+    echo         å–å¾— token: https://dashboard.ngrok.com/get-started/your-authtoken
+    echo         æ–¼ PowerShell åŸ·è¡Œ: ngrok config add-authtoken ä½ çš„Token
     echo.
     pause
     exit /b 1
 )
-echo  [2/3] authtoken ¤w³]©w
+echo  [2/3] authtoken å·²è¨­å®š
 
-REM ---------- 3. ÀË¬d«áºÝ¬O§_¤w¦b¥»¾÷¹B¦æ ----------
-powershell -NoProfile -Command "try{$c=New-Object System.Net.Sockets.TcpClient;$c.Connect('127.0.0.1',%BACKEND_PORT%);$c.Close()}catch{exit 1}" >nul 2>&1
+REM ---------- 3. æª¢æŸ¥å¾Œç«¯æ˜¯å¦å·²åœ¨æœ¬æ©Ÿé‹è¡Œ ----------
+powershell -NoProfile -Command "$c=New-Object System.Net.Sockets.TcpClient;try{$c.Connect('127.0.0.1',%BACKEND_PORT%);$c.Close();exit 0}catch{exit 1}" >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo  [¿ù»~]  «áºÝ¡]127.0.0.1:%BACKEND_PORT%¡^¥¼¦b¹B¦æ¡C
+    echo  [éŒ¯èª¤] å¾Œç«¯ä¼ºæœå™¨ 127.0.0.1:%BACKEND_PORT% æœªåœ¨é‹è¡Œã€‚
     echo.
-    echo         ngrok ¥u¬Oµ¡¤f¡AµLªkÀ°§A±Ò°Ê«áºÝ¡F¨S¶}«áºÝ®É
-    echo         ¥~¤H¥u·|¬Ý¨ì 502 ¿ù»~¡C
-    echo         ½Ð¥ýÂùÀ» ±Ò°Ê¨t²Î.bat¡A½T©w«áºÝ¤w±Ò°Ê«á¦A°õ¦æ¥»ÀÉ¡C
+    echo         ngrok åªæ˜¯é€šé“ï¼Œç„¡æ³•å¹«ä½ å•Ÿå‹•å¾Œç«¯ä¼ºæœå™¨ï¼›
+    echo         è«‹å…ˆé›™æ“Šã€å•Ÿå‹•ç³»çµ±.batã€‘ï¼Œç¢ºå®šå¾Œç«¯å·²å•Ÿå‹•å¾Œå†åŸ·è¡Œæœ¬æª”ã€‚
     echo.
     pause
     exit /b 1
 )
-echo  [3/3] «áºÝ¹B¦æ¤¤ (127.0.0.1:%BACKEND_PORT%)
+echo  [3/3] å¾Œç«¯é‹è¡Œä¸­: 127.0.0.1:%BACKEND_PORT%
 
-if not exist "ngrok-policy.yml" (
+if not exist "%~dp0ngrok-policy.yml" (
     echo.
-    echo  [¿ù»~]  §ä¤£¨ì ngrok-policy.yml¡]±K½X«OÅ@³]©wÀÉ¡^¡C
-    echo         ½Ð½T»{ÀÉ®×»P¥» bat ¦b¦P¤@¸ê®Æ§¨¡C
+    echo  [éŒ¯èª¤] æ‰¾ä¸åˆ° ngrok-policy.yml æµé‡ç­–ç•¥è¨­å®šæª”ã€‚
+    echo         è«‹ç¢ºèªè©²æª”æ¡ˆèˆ‡æœ¬æ‰¹æ¬¡æª”ä½æ–¼åŒä¸€å€‹è³‡æ–™å¤¾ã€‚
+    echo.
     pause
     exit /b 1
 )
 
 echo.
 echo  ============================================================
-echo     §Y±N±Ò°Ê ngrok¡]ÂsÄý¾¹·|¦Û°Ê¶}±Ò¥»¾÷»öªíªO¡^...
+echo     å³å°‡å•Ÿå‹• ngrok é€šé“...
 echo  ============================================================
 echo.
-echo     ¨ú±o¤½¶}ºô§}: http://127.0.0.1:4040
-echo        ©ó»öªíªO Endpoints ­¶ÅÒ¡A½Æ»s HTTPS ºô§}µ¹¨Ï¥ÎªÌ¡C
+echo     æœ¬æ©Ÿç®¡ç†å„€è¡¨æ¿: http://127.0.0.1:4040
+echo     åœæ­¢å…¬é–‹åˆ†äº«: ç›´æŽ¥é—œé–‰æœ¬è¦–çª—å³å¯ã€‚
 echo.
-echo     ±b¸¹±K½X: ¨£ ngrok-policy.yml ªº credentials Äæ¦ì
-echo     ­n´«±K½X½Ð½s¿è¸ÓÀÉ«á­«·s°õ¦æ¥»ÀÉ¡C
-echo.
-echo     °±¥Î¤½¶}: Ãö³¬¥»µøµ¡¡C
-echo.
+
 start "" http://127.0.0.1:4040
-"!NGROK!" http %BACKEND_PORT% --traffic-policy-file ngrok-policy.yml
+"!NGROK!" http %BACKEND_PORT% --traffic-policy-file "%~dp0ngrok-policy.yml"
 
 echo.
-echo  ngrok ¤wµ²§ô¡A¤½¶}ºô§}¤w¥¢®Ä¡C
-echo  ­Y¬°²§±`¤¤Â_¡A½Ð¬Ý¤W¤è¿ù»~°T®§¡F­×¦n«á­«·s°õ¦æ¥»ÀÉ¡C
-echo.
+echo  ngrok å·²çµæŸï¼Œå…¬é–‹ç¶²å€å·²å¤±æ•ˆã€‚
 pause
