@@ -981,6 +981,18 @@ def route_alternatives(req: RouteAlternativesRequest):
     return {"status": "success", "legs": out_legs}
 
 
+# 首頁回傳（必須在所有 API 路由之後註冊）：
+# ngrok 公開時只需一條隧道指向 8000，此路由讓 / 直接回傳 index.html。
+# 注意：只回傳 index.html 單檔，不掛載整個目錄（避免 key.env 等敏感檔案外流）。
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@app.get("/", include_in_schema=False)
+def serve_index():
+    from fastapi.responses import FileResponse
+    return FileResponse(os.path.join(BASE_DIR, "index.html"))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)

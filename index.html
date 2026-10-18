@@ -646,6 +646,10 @@
         const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
 
         let depotStore = []; 
+        // API 位址：本機（bat 開啟）走 127.0.0.1:8000；從 ngrok 等外部網址開啟時走同網域相對路徑
+        const API_BASE = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+            ? 'http://127.0.0.1:8000' : '';
+
         let tripStore = {};  
         const expandedDates = new Set(); 
         const tripLayerGroups = {}; 
@@ -1366,7 +1370,7 @@
             rerouteScanPending++;
             updateRerouteScanStatus();
             try {
-                const resp = await fetch('http://127.0.0.1:8000/api/route/alternatives', {
+                const resp = await fetch(`${API_BASE}/api/route/alternatives`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1817,7 +1821,7 @@
                 };
                 const optCtl = new AbortController();
                 const optTimer = setTimeout(() => optCtl.abort(), 120000);
-                const resp = await fetch("http://127.0.0.1:8000/api/optimize-single-trip", {
+                const resp = await fetch(`${API_BASE}/api/optimize-single-trip`, {
                     method: "POST", 
                     headers: { "Content-Type": "application/json" }, 
                     body: JSON.stringify(payload),
@@ -2018,7 +2022,7 @@
                 const qs = `counties=${encodeURIComponent(counties.join(','))}${force ? '&force=true' : ''}`;
                 const liveCtl = new AbortController();
                 const liveTimer = setTimeout(() => liveCtl.abort(), 60000);
-                const resp = await fetch(`http://127.0.0.1:8000/api/traffic/live?${qs}`, { signal: liveCtl.signal });
+                const resp = await fetch(`${API_BASE}/api/traffic/live?${qs}`, { signal: liveCtl.signal });
                 clearTimeout(liveTimer);
                 if (!resp.ok) return;
                 const data = await resp.json();
