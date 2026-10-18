@@ -45,13 +45,13 @@ if not defined NGROK (
 echo  [1/3] ngrok 已找到: !NGROK!
 
 REM ---------- 2. 檢查 authtoken ----------
-!NGROK! config check >nul 2>&1
+"!NGROK!" config check >nul 2>&1
 if errorlevel 1 (
     echo.
     echo  [錯誤]  未設定 authtoken，請先註冊 ngrok 帳號並綁定。
     echo.
     echo         取得 token:  https://dashboard.ngrok.com/get-started/your-authtoken
-    echo         於 PowerShell 執行:  ngrok config add-authtoken <你的Token>
+    echo         於 PowerShell 執行:  ngrok config add-authtoken 你的Token
     echo.
     pause
     exit /b 1
@@ -62,7 +62,7 @@ REM ---------- 3. 檢查後端是否已在本機運行 ----------
 powershell -NoProfile -Command "try{$c=New-Object System.Net.Sockets.TcpClient;$c.Connect('127.0.0.1',%BACKEND_PORT%);$c.Close()}catch{exit 1}" >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo  [錯誤]  後端 (127.0.0.1:%BACKEND_PORT%) 未在運行。
+    echo  [錯誤]  後端（127.0.0.1:%BACKEND_PORT%）未在運行。
     echo.
     echo         ngrok 只是窗口，無法幫你啟動後端；沒開後端時
     echo         外人只會看到 502 錯誤。
@@ -87,7 +87,7 @@ echo     即將啟動 ngrok（瀏覽器會自動開啟本機儀表板）...
 echo  ============================================================
 echo.
 echo     取得公開網址: http://127.0.0.1:4040
-echo        (儀表板 Endpoints 頁籤 -> 複製 HTTPS 網址給使用者)
+echo        於儀表板 Endpoints 頁籤，複製 HTTPS 網址給使用者。
 echo.
 echo     帳號密碼: 見 ngrok-policy.yml 的 credentials 欄位
 echo     要換密碼請編輯該檔後重新執行本檔。
@@ -95,7 +95,7 @@ echo.
 echo     停用公開: 關閉本視窗。
 echo.
 start "" http://127.0.0.1:4040
-!NGROK! http %BACKEND_PORT% --traffic-policy-file ngrok-policy.yml
+"!NGROK!" http %BACKEND_PORT% --traffic-policy-file ngrok-policy.yml
 
 echo.
 echo  ngrok 已結束，公開網址已失效。
