@@ -1,10 +1,11 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 950 >nul
 title 智慧物流系統 - 對外分享 (ngrok)
 cd /d "%~dp0"
 
 set "BACKEND_PORT=8000"
+set "NGROK="
 
 echo.
 echo  ============================================================
@@ -13,26 +14,38 @@ echo  ============================================================
 echo.
 echo   本視窗的用途：把運行中的後端，接到一條有密碼保護的公開網址。
 echo   啟動前：請先雙擊 啟動系統.bat（後端必須活著）。
-echo   停用方式：關閉本視窗（Y），公開網址立即失效。
+echo   停用方式：關閉本視窗，公開網址立即失效。
 echo.
 
-REM ---------- 1. 檢查 ngrok 是否已安裝 ----------
+REM ---------- 1. 尋找 ngrok（PATH 找不到時自動回退到 winget 安裝位置） ----------
 where ngrok >nul 2>&1
-if errorlevel 1 (
+if not errorlevel 1 set "NGROK=ngrok"
+
+if not defined NGROK (
+    if exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\ngrok.exe" (
+        set "NGROK=%LOCALAPPDATA%\Microsoft\WinGet\Links\ngrok.exe"
+    )
+)
+
+if not defined NGROK (
+    for /d %%D in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\Ngrok.Ngrok_*") do (
+        if exist "%%D\ngrok.exe" set "NGROK=%%D\ngrok.exe"
+    )
+)
+
+if not defined NGROK (
     echo  [錯誤]  找不到 ngrok，尚未安裝。
     echo.
-    echo         請到以下網址安裝其一：
-    echo             管理員 PowerShell 執行:  winget install ngrok.ngrok
+    echo         請以管理員 PowerShell 執行:  winget install ngrok.ngrok
     echo         或至官網手動下載:  https://ngrok.com/download
-    echo         安裝完成後，請重開 PowerShell 再試。
     echo.
     pause
     exit /b 1
 )
-echo  [1/3] ngrok 已安裝
+echo  [1/3] ngrok 已找到: !NGROK!
 
-REM ---------- 2. 檢查 authtoken 是否已設定 ----------
-ngrok config check >nul 2>&1
+REM ---------- 2. 檢查 authtoken ----------
+!NGROK! config check >nul 2>&1
 if errorlevel 1 (
     echo.
     echo  [錯誤]  未設定 authtoken，請先註冊 ngrok 帳號並綁定。
@@ -70,20 +83,22 @@ if not exist "ngrok-policy.yml" (
 
 echo.
 echo  ============================================================
-echo     即將啟動 ngrok（開啟瀏覽器至本機儀表板）...
+echo     即將啟動 ngrok（瀏覽器會自動開啟本機儀表板）...
 echo  ============================================================
 echo.
 echo     取得公開網址: http://127.0.0.1:4040
 echo        (儀表板 Endpoints 頁籤 -> 複製 HTTPS 網址給使用者)
 echo.
-echo     預設帳號密碼: user / ChangeMe_12345
-echo     要換密碼請編輯 ngrok-policy.yml 後重新執行本檔。
+echo     帳號密碼: 見 ngrok-policy.yml 的 credentials 欄位
+echo     要換密碼請編輯該檔後重新執行本檔。
 echo.
-echo     停用公開: 關閉本視窗 (Y)。
+echo     停用公開: 關閉本視窗。
 echo.
 start "" http://127.0.0.1:4040
-ngrok http %BACKEND_PORT% --traffic-policy-file ngrok-policy.yml
+!NGROK! http %BACKEND_PORT% --traffic-policy-file ngrok-policy.yml
 
 echo.
 echo  ngrok 已結束，公開網址已失效。
-timeout /t 3 >nul
+echo  若為異常中斷，請看上方錯誤訊息；修好後重新執行本檔。
+echo.
+pause
