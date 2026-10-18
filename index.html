@@ -1751,11 +1751,15 @@
                             depot: trip.assigned_depot, 
                             stops: activeStops 
                         };
+                        const optCtl = new AbortController();
+                        const optTimer = setTimeout(() => optCtl.abort(), 120000);
                         const resp = await fetch("http://127.0.0.1:8000/api/optimize-single-trip", {
                             method: "POST", 
                             headers: { "Content-Type": "application/json" }, 
-                            body: JSON.stringify(payload)
+                            body: JSON.stringify(payload),
+                            signal: optCtl.signal
                         });
+                        clearTimeout(optTimer);
 
                         if (resp.ok) {
                             const result = await resp.json();
@@ -1794,11 +1798,11 @@
             runBtn.disabled = false; 
             clearBtn.disabled = false;
             progressWrap.style.display = 'none';
-            // 計算完成後先強制重新抓取最新即時車流一次
+            // 計算完成後重新抓取即時車流（走 60 秒快取，避免 TDX 風暴造成卡頓）
             try {
-                await refreshLiveTraffic(true);
+                await refreshLiveTraffic(false);
             } catch (e) {
-                console.error('強制刷新即時車流失敗:', e);
+                console.error('刷新即時車流失敗:', e);
             }
             renderSidebar();
             renderAllMapLayers();
@@ -1824,7 +1828,10 @@
             let vds = {};
             try {
                 const qs = `counties=${encodeURIComponent(counties.join(','))}${force ? '&force=true' : ''}`;
-                const resp = await fetch(`http://127.0.0.1:8000/api/traffic/live?${qs}`);
+                const liveCtl = new AbortController();
+                const liveTimer = setTimeout(() => liveCtl.abort(), 60000);
+                const resp = await fetch(`http://127.0.0.1:8000/api/traffic/live?${qs}`, { signal: liveCtl.signal });
+                clearTimeout(liveTimer);
                 if (!resp.ok) return;
                 const data = await resp.json();
                 vds = data.vds || data.data || {};

@@ -137,7 +137,7 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
             time.sleep(1)
             continue
         if resp.status_code == 429:
-            time.sleep(20 * (attempt + 1))
+            time.sleep(3 * (attempt + 1))
             continue
         return None
     return None

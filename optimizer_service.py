@@ -688,7 +688,7 @@ def traffic_live(counties: str = "", force: bool = False):
 # ================= 改道備選路徑 (Phase 3) =================
 REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
 REROUTE_MAX_LEGS = 2           # 每次最多處理的壅塞 leg 數
-REROUTE_ALT_MAX = 5            # 每條 leg 最多候選路徑數（OSRM alternatives 請求上限）
+REROUTE_ALT_MAX = 3            # 每條 leg 最多候選路徑數（自建 OSRM 預設上限 3，超過會回 400）
 REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢者，供人工比較）
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
 
@@ -858,7 +858,11 @@ def route_alternatives(req: RouteAlternativesRequest):
                    f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
                    f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
             resp = requests.get(url, headers=HEADERS, timeout=8)
-            routes = resp.json().get("routes", []) if resp.status_code == 200 else []
+            if resp.status_code == 200:
+                routes = resp.json().get("routes", [])
+            else:
+                routes = []
+                print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
         except Exception:
             routes = []
         if not routes:
