@@ -8,6 +8,7 @@
 """
 import math
 import bisect
+import os
 import requests
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import FastAPI, HTTPException
@@ -26,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OSRM_BASE_URL = "https://router.project-osrm.org"
+OSRM_BASE_URL = os.environ.get("OSRM_BASE_URL", "http://127.0.0.1:5000")
 HEADERS = {
     "User-Agent": "SmartLogisticsApp/2.0 (Python-FastAPI-Client)",
     "Accept": "application/json"
@@ -369,7 +370,7 @@ def fetch_osrm_table(coords: List[List[float]]) -> List[List[float]]:
     coords_str = ";".join([f"{float(c[0]):.6f},{float(c[1]):.6f}" for c in coords])
     url = f"{OSRM_BASE_URL}/table/v1/driving/{coords_str}?annotations=distance"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp = requests.get(url, headers=HEADERS, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("code") == "Ok" and "distances" in data:
@@ -427,7 +428,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
     url = f"{OSRM_BASE_URL}/route/v1/driving/{coords_str}?overview=full&geometries=geojson&steps=true"
     
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp = requests.get(url, headers=HEADERS, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("routes"):
@@ -856,7 +857,7 @@ def route_alternatives(req: RouteAlternativesRequest):
             url = (f"{OSRM_BASE_URL}/route/v1/driving/"
                    f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
                    f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
-            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp = requests.get(url, headers=HEADERS, timeout=8)
             routes = resp.json().get("routes", []) if resp.status_code == 200 else []
         except Exception:
             routes = []
