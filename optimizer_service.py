@@ -160,7 +160,32 @@ def _slice_path(path: List[List[float]], cum: List[float], d0: float, d1: float)
     return out
 
 
-def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """由點1指向點2的初始方位角（度，0=正北，順時針）。"""
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dlon = math.radians(lon2 - lon1)
+    x = math.sin(dlon) * math.cos(phi2)
+    y = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def _offset_latlon(lat: float, lon: float, bearing_deg: float, dist_m: float) -> List[float]:
+    """由 (lat,lon) 沿方位角前進 dist_m，回傳新點 [lat, lon]。"""
+    R = 6371000.0
+    ang = dist_m / R
+    brg = math.radians(bearing_deg)
+    phi1 = math.radians(lat)
+    lam1 = math.radians(lon)
+    phi2 = math.asin(math.sin(phi1) * math.cos(ang)
+                     + math.cos(phi1) * math.sin(ang) * math.cos(brg))
+    lam2 = lam1 + math.atan2(math.sin(brg) * math.sin(ang) * math.cos(phi1),
+                             math.cos(ang) - math.sin(phi1) * math.sin(phi2))
+    return [math.degrees(phi2), (math.degrees(lam2) + 540.0) % 360.0 - 180.0]
+
+
+def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
+                       force_live: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """比對 VD 與路線，產生標記點與「±500m、遇轉彎截斷」的覆蓋子折線。"""
     path = profile.get("path") or []
     cum = profile.get("cum") or []
@@ -171,7 +196,7 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
     if len(path) < 2 or not cities:
         return points, coverage
 
-    live = tdx_client.live_map(cities)
+    live = tdx_client.live_map(cities, force_live=force_live)
     seen: set = set()
     for city in cities:
         for vd in tdx_client.get_city_vds(city):
@@ -202,6 +227,7 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str]) -> Tuple[List
                 "road": vd.get("RoadName", ""),
                 "road_class": vd.get("RoadClass"),
                 "speed": speed,
+                "speed_valid": entry.get("speed_valid") if entry else False,
                 "color": color,
                 "level": level,
                 "level_name": level_label,
@@ -544,7 +570,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
 
 # ================= 單行程最佳化端點 =================
 @app.post("/api/optimize-single-trip")
-def optimize_single_trip(payload: SingleTripRequest):
+def optimize_single_trip(payload: SingleTripRequest, force: bool = True):
     valid_stops = [s for s in payload.stops if s.lat and s.lon]
     if not valid_stops:
         return {
@@ -620,7 +646,7 @@ def optimize_single_trip(payload: SingleTripRequest):
     # 6. TDX 車輛偵測器：由地址判定縣市 → 取 VD 標記點與覆蓋段
     counties = tdx_client.detect_counties([s.address for s in payload.stops])
     try:
-        vd_points, vd_coverage = compute_vd_overlay(route_calc.get("profile", {}), counties)
+        vd_points, vd_coverage = compute_vd_overlay(route_calc.get("profile", {}), counties, force_live=force)
     except Exception as exc:  # TDX 失敗不影響路線計算
         print(f"[TDX] VD overlay 失敗: {exc}")
         vd_points, vd_coverage = [], []
@@ -648,10 +674,13 @@ def optimize_single_trip(payload: SingleTripRequest):
 
 
 @app.get("/api/traffic/live")
-def traffic_live(counties: str = ""):
-    """輪詢用：回傳指定縣市的 VD 即時速度與官方壅塞等級（前端據此更新顏色）。"""
+def traffic_live(counties: str = "", force: bool = False):
+    """輪詢用：回傳指定縣市的 VD 即時速度與官方壅塞等級（前端據此更新顏色）。
+
+    force=True 時跳過即時資料快取，每次皆向 TDX 重新取號誌。
+    """
     codes = [c.strip() for c in counties.split(",") if c.strip()]
-    data = tdx_client.live_map(codes)
+    data = tdx_client.live_map(codes, force_live=force)
     return {"status": "success", "counties": codes, "vds": data}
 
 
