@@ -656,10 +656,11 @@ def traffic_live(counties: str = ""):
 
 
 # ================= 改道備選路徑 (Phase 3) =================
-REROUTE_MIN_WINDOW_M = 200.0   # P1→P2 區間過短則不提改道
+REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
 REROUTE_MAX_LEGS = 2           # 每次最多處理的壅塞 leg 數
 REROUTE_ALT_MAX = 2            # 每條 leg 最多候選路徑數
-REROUTE_MIN_SAVED_MIN = 0.1    # 節省時間門檻（分）
+REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢者，供人工比較）
+REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
 
 
 def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
@@ -859,9 +860,9 @@ def route_alternatives(req: RouteAlternativesRequest):
             alt_total_m = alt_cum[-1]
             if alt_total_m <= 0:
                 continue
-            # 幾何過濾：與主線偏離過小＝假備選
+            # 幾何過濾：與主線幾乎重疊（假備選）才丟棄
             max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, path, cum)
-            if max_off <= COVERAGE_THRESHOLD_M:
+            if max_off <= REROUTE_MIN_DEVIATION_M:
                 continue
             alt_osrm_s = float(rt.get("duration") or 0.0)
             alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
@@ -877,6 +878,7 @@ def route_alternatives(req: RouteAlternativesRequest):
                 "p2_m": round(p2, 1),
                 "leg_start_m": round(leg_start, 1),
                 "leg_end_m": round(leg_end, 1),
+                "main_p1p2_min": round(main_p1p2_s / 60.0, 1),
                 "base_p1p2_min": round(base_p1p2_s / 60.0, 1),
                 "alt_p1p2_min": round(alt_p1p2_s / 60.0, 1),
                 "eta_min": round(cand_total_s / 60.0, 1),
