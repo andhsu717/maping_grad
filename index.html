@@ -419,6 +419,8 @@
         .node-title { font-size: 13px; font-weight: 700; color: #0f172a; }
         .node-addr { font-size: 11px; color: #475569; word-break: break-all; margin-bottom: 4px; }
         .node-count-badge { font-size: 10px; background: #e0f2fe; color: #0284c7; padding: 1px 6px; border-radius: 10px; font-weight: 600; border: 1px solid #bae6fd; flex-shrink: 0; }
+        .tl-cancel-btn { margin-left: 6px; font-size: 12px; line-height: 1; width: 20px; height: 20px; border: 1px solid #fecaca; border-radius: 50%; background: #fef2f2; color: #dc2626; cursor: pointer; flex-shrink: 0; padding: 0; }
+        .tl-cancel-btn:hover { background: #fee2e2; border-color: #dc2626; }
 
         /* 箭頭樣式 (依需求：現階段以綠色為主) */
         .timeline-arrow-wrap {
@@ -507,18 +509,25 @@
         .vd-warn-icon.sim .vd-warn-box {
             box-shadow: 0 0 0 2px #7c3aed, 0 0 0 4px rgba(124, 58, 237, 0.35);
         }
-        .vd-toggle-panel { background: #ffffff; padding: 6px 10px; border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.3); font-size: 12px; color: #334155; }
+        .vd-toggle-panel { background: #ffffff; padding: 8px 10px; border-radius: 6px; box-shadow: 0 1px 6px rgba(0,0,0,0.3); font-size: 12px; color: #334155; min-width: 190px; }
         .vd-toggle-panel label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
-        .vd-toggle-panel #vd-clear-sim-btn { margin-top: 6px; width: 100%; font-size: 11px; padding: 3px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f1f5f9; color: #334155; cursor: pointer; }
-        .vd-toggle-panel #vd-clear-sim-btn:hover { background: #e2e8f0; }
+        .vd-toolbar-btns { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+        .vd-toggle-panel #vd-clear-sim-btn, .vd-toggle-panel #vd-clear-reroute-btn, .vd-toggle-panel #vd-restore-btn { flex: 1 1 auto; font-size: 11px; padding: 3px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f1f5f9; color: #334155; cursor: pointer; white-space: nowrap; }
+        .vd-toggle-panel #vd-clear-sim-btn:hover, .vd-toggle-panel #vd-clear-reroute-btn:hover, .vd-toggle-panel #vd-restore-btn:hover:not(:disabled) { background: #e2e8f0; }
+        .vd-toggle-panel #vd-restore-btn:disabled { opacity: 0.5; cursor: default; }
+        #cancelled-stop-list { margin-top: 6px; max-height: 180px; overflow-y: auto; border-top: 1px solid #e2e8f0; padding-top: 4px; }
+        .cancelled-stop-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 0; }
+        .cancelled-stop-info { min-width: 0; display: flex; flex-direction: column; }
+        .cancelled-stop-trip { color: #64748b; font-size: 10px; }
+        .cancelled-stop-name { color: #334155; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .restore-stop-btn { font-size: 10px; padding: 2px 6px; border: 1px solid #16a34a; border-radius: 4px; background: #16a34a; color: #ffffff; cursor: pointer; flex-shrink: 0; }
+        .restore-stop-btn:hover { background: #15803d; }
+        .vd-toggle-panel #vd-scan-status { margin-top: 4px; font-size: 11px; color: #7c3aed; display: none; }
+        .vd-toggle-panel #vd-scan-status.active { display: block; }
         .vd-sim-row { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
         .vd-sim-btn { font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; color: #334155; cursor: pointer; }
         .vd-sim-btn:hover { background: #e2e8f0; }
         .vd-sim-btn.active { background: #f59e0b; color: #ffffff; border-color: #f59e0b; }
-        .vd-toggle-panel #vd-clear-reroute-btn { margin-top: 6px; width: 100%; font-size: 11px; padding: 3px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f1f5f9; color: #334155; cursor: pointer; }
-        .vd-toggle-panel #vd-clear-reroute-btn:hover { background: #e2e8f0; }
-        .vd-toggle-panel #vd-scan-status { margin-top: 4px; font-size: 11px; color: #7c3aed; display: none; }
-        .vd-toggle-panel #vd-scan-status.active { display: block; }
         .alt-eta-badge { background: rgba(255, 255, 255, 0.95); border: 1px solid #475569; color: #1e293b; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; white-space: nowrap; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); display: flex; align-items: center; gap: 4px; }
         .alt-eta-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
         .reroute-panel { margin: 4px 0 8px 28px; padding: 6px 8px; background: #f5f3ff; border: 1px solid #c4b5fd; border-radius: 6px; font-size: 11px; color: #5b21b6; }
@@ -658,14 +667,19 @@
         vdToggleControl.onAdd = function () {
             const div = L.DomUtil.create('div', 'vd-toggle-panel');
             div.innerHTML = '<label><input type="checkbox" id="vd-toggle-uncovered"' + (showUncoveredVd ? ' checked' : '') + ' /> 顯示未覆蓋 VD</label>'
+                + '<div class="vd-toolbar-btns">'
                 + '<button type="button" id="vd-clear-sim-btn">清除模擬</button>'
                 + '<button type="button" id="vd-clear-reroute-btn">清除改道</button>'
+                + '<button type="button" id="vd-restore-btn" disabled>恢復取消點 (<span id="vd-restore-count">0</span>)</button>'
+                + '</div>'
+                + '<div id="cancelled-stop-list" style="display:none;"></div>'
                 + '<div id="vd-scan-status"></div>';
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
             return div;
         };
         vdToggleControl.addTo(map);
+        updateCancelledToolbar();
         document.addEventListener('change', function (e) {
             if (e.target && e.target.id === 'vd-toggle-uncovered') {
                 showUncoveredVd = e.target.checked;
@@ -686,6 +700,18 @@
             }
             if (t.classList && t.classList.contains('reroute-apply-btn')) {
                 applyReroute(t.getAttribute('data-trip'), parseInt(t.getAttribute('data-leg'), 10), parseInt(t.getAttribute('data-alt'), 10));
+                return;
+            }
+            if (t.classList && t.classList.contains('tl-cancel-btn')) {
+                cancelSequenceStop(t.getAttribute('data-trip'), parseInt(t.getAttribute('data-idx'), 10));
+                return;
+            }
+            if (t.id === 'vd-restore-btn') {
+                toggleCancelledList();
+                return;
+            }
+            if (t.classList && t.classList.contains('restore-stop-btn')) {
+                restoreStop(t.getAttribute('data-trip'), parseInt(t.getAttribute('data-sidx'), 10));
                 return;
             }
             const lvAttr = t.getAttribute('data-lv');
@@ -1086,11 +1112,13 @@
                 trip.originalRoute = null;
                 trip.appliedReroutes = {};
                 trip.rerouteOptions = [];
+                (trip.stops || []).forEach(s => { s.status = 'ACTIVE'; });
             });
             renderSidebar();
             renderAllMapLayers();
             updateTimelineTripOptions();
             renderTimelineView();
+            updateCancelledToolbar();
         }
 
         function makeVdWarnIcon(onRoute, color, manual) {
@@ -1702,7 +1730,10 @@
                         <div class="node-content">
                             <div class="node-title-row">
                                 <span class="node-title">${item.address || '無地址資料'}</span>
-                                <span class="node-count-badge">${item.merged_count} 站</span>
+                                <span style="display:flex; align-items:center; flex-shrink:0;">
+                                    <span class="node-count-badge">${item.merged_count} 站</span>
+                                    <button type="button" class="tl-cancel-btn" data-trip="${trip.trip_key}" data-idx="${index}" title="取消此站（整列合併站一併取消）">×</button>
+                                </span>
                             </div>
                         </div>
                     `;
@@ -1774,6 +1805,157 @@
         }
 
         /* ========== 執行排程與道路車速最佳化 ========== */
+        async function optimizeSingleTrip(trip) {
+            if (!trip.assigned_depot) return false;
+            const activeStops = trip.stops.filter(s => s.status === 'ACTIVE');
+            try {
+                const payload = { 
+                    date: trip.date,
+                    order_id: trip.order_id, 
+                    depot: trip.assigned_depot, 
+                    stops: activeStops 
+                };
+                const optCtl = new AbortController();
+                const optTimer = setTimeout(() => optCtl.abort(), 120000);
+                const resp = await fetch("http://127.0.0.1:8000/api/optimize-single-trip", {
+                    method: "POST", 
+                    headers: { "Content-Type": "application/json" }, 
+                    body: JSON.stringify(payload),
+                    signal: optCtl.signal
+                });
+                clearTimeout(optTimer);
+
+                if (!resp.ok) return false;
+                const result = await resp.json();
+                trip.route_result = {
+                    distance_km: result.total_distance_km, 
+                    duration_min: result.estimated_duration_min,
+                    polyline: result.polyline, 
+                    sequence: result.sequence,
+                    legs: result.legs
+                };
+                (trip.route_result.legs || []).forEach(leg => {
+                    leg.base_duration_min = leg.duration_min;
+                    leg.base_traffic_status = leg.traffic_status || 'GREEN';
+                });
+                trip.vd_result = {
+                    counties: result.counties, 
+                    points: result.vd_points,
+                    coverage: result.vd_coverage
+                };
+                trip.route_meta = result.route_meta || null;
+                trip.originalRoute = null;
+                trip.appliedReroutes = {};
+                trip.rerouteOptions = [];
+                trip.is_computed = true;
+                applyVdEta(trip);
+                scheduleRerouteScan(trip);
+                return true;
+            } catch (err) { 
+                console.error(`車次 ${trip.trip_key} 計算失敗:`, err); 
+                return false;
+            }
+        }
+
+        async function reoptimizeTrip(trip) {
+            if (!trip || trip._busy) return;
+            trip._busy = true;
+            updateCancelledToolbar();
+            try {
+                await optimizeSingleTrip(trip);
+            } finally {
+                trip._busy = false;
+            }
+            try {
+                await refreshLiveTraffic(false);
+            } catch (e) {
+                console.error('刷新即時車流失敗:', e);
+            }
+            renderSidebar();
+            renderAllMapLayers();
+            updateTimelineTripOptions();
+            renderTimelineView();
+            updateCancelledToolbar();
+        }
+
+        function cancelSequenceStop(tripKey, seqIdx) {
+            const trip = tripStore[tripKey];
+            if (!trip || trip._busy || !trip.route_result) return;
+            const item = (trip.route_result.sequence || [])[seqIdx];
+            if (!item || item.type !== 'STOP') return;
+            const ids = new Set((item.orders || []).map(o => o.stop_id));
+            if (ids.size === 0 && item.stop_id) ids.add(item.stop_id);
+            const n = (trip.stops || []).filter(s => s.status === 'ACTIVE' && ids.has(s.stop_id)).length;
+            if (n === 0) return;
+            if (!confirm(`取消 ${item.address || item.stop_id}（${n} 個訂單）？將立即重算路徑。`)) return;
+            (trip.stops || []).forEach(s => {
+                if (s.status === 'ACTIVE' && ids.has(s.stop_id)) s.status = 'CANCELLED';
+            });
+            reoptimizeTrip(trip);
+        }
+
+        function collectCancelledStops() {
+            const out = [];
+            Object.values(tripStore).forEach(trip => {
+                (trip.stops || []).forEach((s, idx) => {
+                    if (s.status === 'CANCELLED') out.push({ trip, stop: s, sidx: idx });
+                });
+            });
+            return out;
+        }
+
+        function renderCancelledList() {
+            const list = document.getElementById('cancelled-stop-list');
+            if (!list) return;
+            const items = collectCancelledStops();
+            if (items.length === 0) {
+                list.style.display = 'none';
+                list.innerHTML = '';
+                return;
+            }
+            list.innerHTML = items.map(({ trip, stop, sidx }) => `
+                <div class="cancelled-stop-row">
+                    <div class="cancelled-stop-info">
+                        <span class="cancelled-stop-trip">[${trip.date}] ${trip.order_id}</span>
+                        <span class="cancelled-stop-name">${stop.name || stop.stop_id}</span>
+                    </div>
+                    <button type="button" class="restore-stop-btn" data-trip="${trip.trip_key}" data-sidx="${sidx}">恢復</button>
+                </div>`).join('');
+        }
+
+        function updateCancelledToolbar() {
+            const btn = document.getElementById('vd-restore-btn');
+            if (!btn) return;
+            const items = collectCancelledStops();
+            const badge = document.getElementById('vd-restore-count');
+            if (badge) badge.textContent = items.length;
+            const list = document.getElementById('cancelled-stop-list');
+            const open = list && list.style.display !== 'none' && list.style.display !== '';
+            btn.disabled = items.length === 0;
+            if (open) renderCancelledList();
+        }
+
+        function toggleCancelledList() {
+            const list = document.getElementById('cancelled-stop-list');
+            if (!list) return;
+            const open = list.style.display === 'none' || list.style.display === '';
+            if (open) {
+                renderCancelledList();
+                list.style.display = 'block';
+            } else {
+                list.style.display = 'none';
+            }
+        }
+
+        function restoreStop(tripKey, sidx) {
+            const trip = tripStore[tripKey];
+            if (!trip || trip._busy) return;
+            const stop = (trip.stops || [])[sidx];
+            if (!stop || stop.status !== 'CANCELLED') return;
+            stop.status = 'ACTIVE';
+            reoptimizeTrip(trip);
+        }
+
         async function runQueueOptimization() {
             const selectedTrips = Object.values(tripStore).filter(t => t.is_selected);
             if (selectedTrips.length === 0) return alert("請至少勾選一個車次進行計算！");
@@ -1795,52 +1977,7 @@
                 progressBar.style.width = `${Math.round(((i + 1) / selectedTrips.length) * 100)}%`;
 
                 if (activeStops.length > 0 && trip.assigned_depot) {
-                    try {
-                        const payload = { 
-                            date: trip.date,
-                            order_id: trip.order_id, 
-                            depot: trip.assigned_depot, 
-                            stops: activeStops 
-                        };
-                        const optCtl = new AbortController();
-                        const optTimer = setTimeout(() => optCtl.abort(), 120000);
-                        const resp = await fetch("http://127.0.0.1:8000/api/optimize-single-trip", {
-                            method: "POST", 
-                            headers: { "Content-Type": "application/json" }, 
-                            body: JSON.stringify(payload),
-                            signal: optCtl.signal
-                        });
-                        clearTimeout(optTimer);
-
-                        if (resp.ok) {
-                            const result = await resp.json();
-                            trip.route_result = {
-                                distance_km: result.total_distance_km, 
-                                duration_min: result.estimated_duration_min,
-                                polyline: result.polyline, 
-                                sequence: result.sequence,
-                                legs: result.legs
-                            };
-                            (trip.route_result.legs || []).forEach(leg => {
-                                leg.base_duration_min = leg.duration_min;
-                                leg.base_traffic_status = leg.traffic_status || 'GREEN';
-                            });
-                            trip.vd_result = {
-                                counties: result.counties, 
-                                points: result.vd_points,
-                                coverage: result.vd_coverage
-                            };
-                            trip.route_meta = result.route_meta || null;
-                            trip.originalRoute = null;
-                            trip.appliedReroutes = {};
-                            trip.rerouteOptions = [];
-                            trip.is_computed = true;
-                            applyVdEta(trip);
-                            scheduleRerouteScan(trip);
-                        }
-                    } catch (err) { 
-                        console.error(`車次 ${trip.trip_key} 計算失敗:`, err); 
-                    }
+                    await optimizeSingleTrip(trip);
                 }
                 await new Promise(r => setTimeout(r, 120)); 
             }
