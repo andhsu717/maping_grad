@@ -570,7 +570,7 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
 
 # ================= 單行程最佳化端點 =================
 @app.post("/api/optimize-single-trip")
-def optimize_single_trip(payload: SingleTripRequest, force: bool = True):
+def optimize_single_trip(payload: SingleTripRequest, force: bool = False):
     valid_stops = [s for s in payload.stops if s.lat and s.lon]
     if not valid_stops:
         return {
