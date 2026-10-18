@@ -1219,7 +1219,7 @@
 
         function rerenderVdAndEta() {
             buildVdPointIndex();
-            Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) applyVdEta(t); });
+            Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) { applyVdEta(t); scheduleRerouteScan(t); } });
             renderSidebar();
             renderAllMapLayers();
             renderTimelineView();
@@ -1407,11 +1407,13 @@
                     (trip.rerouteOptions || []).forEach(item => {
                         (item.alternatives || []).forEach((alt, ai) => {
                             if (!alt.seg_polyline || alt.seg_polyline.length < 2) return;
-                            const altColor = ai === 0 ? '#7c3aed' : '#2563eb';
+                            const altColor = (alt.saved_min < 0) ? '#94a3b8' : (ai === 0 ? '#7c3aed' : '#2563eb');
+                            const savedTxt = (alt.saved_min < 0) ? `多 ${Math.abs(alt.saved_min).toFixed(1)} 分` : `省 ${alt.saved_min.toFixed(1)} 分`;
+                            const segTxt = `Leg ${item.leg_index + 1} 壅塞段：原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選 ${alt.alt_p1p2_min} 分（${savedTxt}）`;
                             L.polyline(alt.seg_polyline, {
                                 color: altColor, weight: 4, opacity: 0.85, dashArray: '8,6'
                             }).addTo(layerGroup)
-                                .bindTooltip(`改道建議 (Leg ${item.leg_index + 1} 備選${ai + 1})：目前 ${item.current_eta_min} 分 ｜ 備選 ${alt.eta_min} 分 ｜ 省 ${alt.saved_min} 分`, { sticky: true });
+                                .bindTooltip(segTxt, { sticky: true });
                             if (alt.exit_at) {
                                 L.circleMarker(alt.exit_at, { radius: 6, color: altColor, fillColor: '#ffffff', fillOpacity: 1, weight: 2 })
                                     .bindTooltip('建議提早改道點').addTo(layerGroup);
@@ -1671,7 +1673,8 @@
                         rrPanel.className = 'reroute-panel';
                         let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}）</div>`;
                         rrItem.alternatives.forEach((alt, ai) => {
-                            rrHtml += `<div class="reroute-row"><span>目前 ${rrItem.current_eta_min} 分 ｜ 備選${ai + 1}: ${alt.eta_min} 分（省 ${alt.saved_min} 分）</span>`
+                            const savedTxt = (alt.saved_min < 0) ? `多 ${Math.abs(alt.saved_min).toFixed(1)} 分` : `省 ${alt.saved_min.toFixed(1)} 分`;
+                            rrHtml += `<div class="reroute-row"><span>壅塞原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選${ai + 1}: ${alt.alt_p1p2_min} 分（${savedTxt}）｜ 整趟 ${rrItem.current_eta_min} → ${alt.eta_min} 分</span>`
                                 + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-leg="${index}" data-alt="${ai}">套用</button></div>`;
                         });
                         rrPanel.innerHTML = rrHtml;
