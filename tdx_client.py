@@ -53,6 +53,10 @@ CONGESTION_TTL_SEC = 6 * 3600
 # 公路局 fallback 門檻（無官方逐路段定義時使用，單位 km/h）
 FALLBACK_LEVEL_SPEED = [(40.0, 1), (20.0, 3), (0.0, 5)]
 
+# 車速合理範圍（km/h）：超出視為偵測器異常，歸類為綠燈（順暢）
+SPEED_VALID_MIN = 0.5
+SPEED_VALID_MAX = 150.0
+
 
 def _load_credentials() -> Tuple[Optional[str], Optional[str]]:
     cid = sec = None
@@ -189,6 +193,13 @@ def extract_speed(vd_live: Dict[str, Any]) -> float:
     return round(sum(speeds) / len(speeds), 1)
 
 
+def is_speed_valid(speed: Optional[float]) -> bool:
+    """車速是否落在合理範圍（0.5~150 km/h）。超出視為偵測器異常。"""
+    if not isinstance(speed, (int, float)):
+        return False
+    return SPEED_VALID_MIN <= float(speed) <= SPEED_VALID_MAX
+
+
 def get_congestion_levels(city: str) -> Dict[str, List[Dict[str, Any]]]:
     """官方路況壅塞水準定義：{CongestionLevelID: [Level 定義...]}（長快取）。"""
     now = time.time()
@@ -218,10 +229,10 @@ def get_city_sections(city: str, use_cache: bool = True) -> List[Dict[str, Any]]
     return secs
 
 
-def get_link_to_clid(city: str) -> Dict[str, Any]:
+def get_link_to_clid(city: str, force_live: bool = False) -> Dict[str, Any]:
     """{LinkID: CongestionLevelID}（由即時路段建立，補足無法直接命中的 VD）。"""
     mapping: Dict[str, Any] = {}
-    for section in get_city_sections(city):
+    for section in get_city_sections(city, use_cache=not force_live):
         clid = section.get("CongestionLevelID")
         for link in (section.get("LinkIDs") or []):
             lid = link.get("LinkID") if isinstance(link, dict) else link
@@ -296,8 +307,13 @@ def level_name(levels: Optional[List[Dict[str, Any]]], level: Optional[int]) -> 
     return ""
 
 
-def live_map(cities: List[str]) -> Dict[str, Dict[str, Any]]:
-    """回傳 {VDID: {speed, status, collect_time, level, level_name, color, levels}}。"""
+def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str, Any]]:
+    """回傳 {VDID: {speed, status, collect_time, speed_valid, level, level_name, color, levels}}。
+
+    force_live=True 時跳過即時資料快取（速度/路段），每次皆重新向 TDX 取號誌；
+    靜態設備清單與壅塞門檻定義仍走長快取。
+    車速不合理（<0.5 或 >150 km/h）視為偵測器異常 → 歸類為 GREEN（level 1）。
+    """
     result: Dict[str, Dict[str, Any]] = {}
     for city in cities:
         by_clid = get_congestion_levels(city)
@@ -308,22 +324,31 @@ def live_map(cities: List[str]) -> Dict[str, Dict[str, Any]]:
             if not vdid:
                 continue
             if link2clid is None and not any(lid in by_clid for lid in _vd_links(vd)):
-                link2clid = get_link_to_clid(city)
+                link2clid = get_link_to_clid(city, force_live=force_live)
             levels_by_vdid[vdid] = _resolve_levels(vd, by_clid, link2clid)
-        for entry in get_city_vd_live(city):
+        for entry in get_city_vd_live(city, use_cache=not force_live):
             vdid = str(entry.get("VDID", ""))
             if not vdid:
                 continue
             speed = extract_speed(entry)
+            status = entry.get("Status")
             levels = levels_by_vdid.get(vdid)
-            level = classify_congestion(speed, levels)
+            if speed is None or status not in (None, 0):
+                color, level, speed_valid, levels = "GRAY", None, False, None
+            elif not is_speed_valid(speed):
+                color, level, speed_valid = "GREEN", 1, False
+            else:
+                level = classify_congestion(speed, levels)
+                color = level_color(level)
+                speed_valid = True
             result[vdid] = {
                 "speed": speed,
-                "status": entry.get("Status"),
+                "status": status,
                 "collect_time": entry.get("DataCollectTime"),
+                "speed_valid": speed_valid,
                 "level": level,
                 "level_name": level_name(levels, level),
-                "color": level_color(level),
+                "color": color,
                 "levels": levels,
             }
     return result
