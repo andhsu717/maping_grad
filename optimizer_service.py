@@ -739,6 +739,7 @@ REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢�
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
 REROUTE_SCOPE_MAX = 3          # 找不到候選時向外擴展的最大階數
 REROUTE_SCOPE_STEP_M = 200.0   # 轉彎稀疏時的固定擴展步進 (公尺)
+REROUTE_CLUSTER_GAP_M = 200.0  # 同 leg 壅塞區間間隔 ≥ 此值才拆成不同事件
 
 
 def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
@@ -912,7 +913,8 @@ class RouteAlternativesRequest(BaseModel):
 
 @app.post("/api/route/alternatives")
 def route_alternatives(req: RouteAlternativesRequest):
-    """對所有壅塞 leg 推算改道點 (P1)/回歸點 (P2)，回全量候選與狀態 (CAN_REROUTE/CANNOT_REROUTE)。"""
+    """將每條 leg 的壅塞依間隔分群成多個事件，各別推算改道點 (P1)/回歸點 (P2)，
+    回全量候選與狀態 (CAN_REROUTE/CANNOT_REROUTE)。"""
     path = req.polyline or []
     if len(path) < 2:
         return {"status": "success", "legs": []}
@@ -932,8 +934,8 @@ def route_alternatives(req: RouteAlternativesRequest):
     legs_info = {l.leg_index: (l.model_dump() if hasattr(l, "model_dump") else l.dict())
                  for l in req.legs}
 
-    # 1) 依有效顏色合併每條 leg 的橘/紅壅塞區間
-    by_leg: Dict[int, Dict[str, Any]] = {}
+    # 1) 收集每條 leg 的橘/紅壅塞區間（稍後依間隔分群為多個事件）
+    by_leg: Dict[int, List[List[Any]]] = {}
     for cov in req.coverage:
         color = cov.get("color")
         if color not in ("ORANGE", "RED"):
@@ -947,32 +949,34 @@ def route_alternatives(req: RouteAlternativesRequest):
             b = s + float(cov.get("fwd_m", 0.0))
         except (TypeError, ValueError):
             continue
-        li = int(li)
-        slot = by_leg.setdefault(li, {"a": a, "b": b, "worst": color})
-        slot["a"] = min(slot["a"], a)
-        slot["b"] = max(slot["b"], b)
-        if color == "RED":
-            slot["worst"] = "RED"
+        by_leg.setdefault(int(li), []).append([a, b, color])
 
-    ranked = sorted(by_leg.items(), key=lambda kv: kv[0])
-    if not ranked:
+    if not by_leg:
         return {"status": "success", "legs": []}
+
+    # 分群：同一 leg 內間隔 < REROUTE_CLUSTER_GAP_M 才合併，其餘各自獨立成事件
+    leg_clusters: Dict[int, List[Dict[str, Any]]] = {}
+    for li, ivs in by_leg.items():
+        ivs.sort(key=lambda x: x[0])
+        clusters: List[Dict[str, Any]] = []
+        for a, b, color in ivs:
+            if clusters and a - clusters[-1]["b"] < REROUTE_CLUSTER_GAP_M:
+                clusters[-1]["b"] = max(clusters[-1]["b"], b)
+                if color == "RED":
+                    clusters[-1]["worst"] = "RED"
+            else:
+                clusters.append({"a": a, "b": b, "worst": color})
+        leg_clusters[li] = clusters
 
     merged_main = _vd_intervals_on_path(path, cum, vds)
 
     out_legs: List[Dict[str, Any]] = []
-    for li, slot in ranked:
-        a, b = slot["a"], slot["b"]
+    for li in sorted(leg_clusters.keys()):
+        clusters = leg_clusters[li]
         # 站點邊界：改道不得跨過本 leg 的站點，也不得侵入相鄰 leg（事件隔離）
         leg_info = legs_info.get(li, {})
         leg_start = leg_bounds[li - 1] if 0 < li < len(leg_bounds) else 0.0
         leg_end = leg_bounds[li] if li < len(leg_bounds) else total_m
-        base: Dict[str, Any] = {
-            "leg_index": li,
-            "a_m": round(a, 1),
-            "b_m": round(b, 1),
-            "alternatives": [],
-        }
         # 主線 leg 的名目速度與當前（含壅塞）總時間
         leg_base_min = float(leg_info.get("base_duration_min")
                              or leg_info.get("duration_min") or 0.0)
@@ -982,48 +986,65 @@ def route_alternatives(req: RouteAlternativesRequest):
         if main_total_s <= 0:
             main_total_s = total_m / max(leg_nom, 1.0)
 
-        if leg_end - leg_start < REROUTE_MIN_WINDOW_M:
-            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
-            continue
+        for ci, slot in enumerate(clusters):
+            a, b = slot["a"], slot["b"]
+            # 事件隔離：可展範圍以與相鄰 cluster 的 gap 中點為界（最外側取 leg 邊界）
+            evt_start = leg_start
+            evt_end = leg_end
+            if ci > 0:
+                evt_start = max(leg_start, (clusters[ci - 1]["b"] + a) / 2.0)
+            if ci < len(clusters) - 1:
+                evt_end = min(leg_end, (b + clusters[ci + 1]["a"]) / 2.0)
 
-        # 2) 候選改道點：壅塞前/後取更遠的轉彎；轉彎用盡後以固定步進往兩側外推
-        turns_before = [t for t in turns if t <= a]
-        turns_after = [t for t in turns if t >= b]
-
-        def _cand_p1(k: int) -> float:
-            if k < len(turns_before):
-                return turns_before[-1 - k]
-            ref = turns_before[0] if turns_before else a
-            return ref - REROUTE_SCOPE_STEP_M * (k - len(turns_before) + 1)
-
-        def _cand_p2(k: int) -> float:
-            if k < len(turns_after):
-                return turns_after[k]
-            ref = turns_after[-1] if turns_after else b
-            return ref + REROUTE_SCOPE_STEP_M * (k - len(turns_after) + 1)
-
-        # 3) 動態範圍擴展：取最小 k（最近範圍）且有有效候選者
-        found = False
-        for k in range(REROUTE_SCOPE_MAX + 1):
-            p1 = max(leg_start, min(_cand_p1(k), a))
-            p2 = min(leg_end, max(_cand_p2(k), b))
-            if p2 - p1 < REROUTE_MIN_WINDOW_M:
+            base: Dict[str, Any] = {
+                "leg_index": li,
+                "event_id": f"{li}:{round(a, 1)}",
+                "a_m": round(a, 1),
+                "b_m": round(b, 1),
+                "alternatives": [],
+            }
+            if evt_end - evt_start < REROUTE_MIN_WINDOW_M:
+                out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
                 continue
-            alts = _reroute_candidates(path, cum, vds, merged_main, p1, p2,
-                                       leg_start, leg_end, leg_nom, main_total_s)
-            if alts:
-                out_legs.append({
-                    **base,
-                    "state": "CAN_REROUTE",
-                    "reason": None,
-                    "scope": k,
-                    "current_eta_min": round(main_total_s / 60.0, 1),
-                    "alternatives": alts,
-                })
-                found = True
-                break
-        if not found:
-            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
+
+            # 2) 候選改道點：壅塞前/後取更遠的轉彎；轉彎用盡後以固定步進往兩側外推
+            turns_before = [t for t in turns if t <= a]
+            turns_after = [t for t in turns if t >= b]
+
+            def _cand_p1(k: int) -> float:
+                if k < len(turns_before):
+                    return turns_before[-1 - k]
+                ref = turns_before[0] if turns_before else a
+                return ref - REROUTE_SCOPE_STEP_M * (k - len(turns_before) + 1)
+
+            def _cand_p2(k: int) -> float:
+                if k < len(turns_after):
+                    return turns_after[k]
+                ref = turns_after[-1] if turns_after else b
+                return ref + REROUTE_SCOPE_STEP_M * (k - len(turns_after) + 1)
+
+            # 3) 動態範圍擴展：取最小 k（最近範圍）且有有效候選者
+            found = False
+            for k in range(REROUTE_SCOPE_MAX + 1):
+                p1 = max(evt_start, min(_cand_p1(k), a))
+                p2 = min(evt_end, max(_cand_p2(k), b))
+                if p2 - p1 < REROUTE_MIN_WINDOW_M:
+                    continue
+                alts = _reroute_candidates(path, cum, vds, merged_main, p1, p2,
+                                           leg_start, leg_end, leg_nom, main_total_s)
+                if alts:
+                    out_legs.append({
+                        **base,
+                        "state": "CAN_REROUTE",
+                        "reason": None,
+                        "scope": k,
+                        "current_eta_min": round(main_total_s / 60.0, 1),
+                        "alternatives": alts,
+                    })
+                    found = True
+                    break
+            if not found:
+                out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
 
     return {"status": "success", "legs": out_legs}
 
