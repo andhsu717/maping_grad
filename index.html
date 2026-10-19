@@ -2024,13 +2024,12 @@
             } catch (e) {
                 console.error('刷新即時車流失敗:', e);
             }
-            // 排程結束後逐一重掃改道（避免多車次同時打爆 OSRM）
+            // 排程結束後分批（每批 2 車次）重掃改道，避免多車次同時打爆 OSRM
             queueRunning = false;
             Object.keys(rerouteScanTimers).forEach(k => clearTimeout(rerouteScanTimers[k]));
-            for (const trip of selectedTrips) {
-                if (trip.is_computed && trip.route_result) {
-                    await scanReroutesForTrip(trip);
-                }
+            const scanTrips = selectedTrips.filter(t => t.is_computed && t.route_result);
+            for (let i = 0; i < scanTrips.length; i += 2) {
+                await Promise.all(scanTrips.slice(i, i + 2).map(t => scanReroutesForTrip(t)));
             }
             renderSidebar();
             renderAllMapLayers();
