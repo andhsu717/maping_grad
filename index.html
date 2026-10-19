@@ -1281,6 +1281,7 @@
         /* ========== 改道系統：掃描/繪製/套用/清除 ========== */
         const rerouteScanTimers = {};
         let rerouteScanPending = 0;
+        let queueRunning = false; // 計算排程期間凍結改道掃描，避免與路徑計算互搶 OSRM
 
         function updateRerouteScanStatus() {
             const el = document.getElementById('vd-scan-status');
@@ -1343,6 +1344,7 @@
         }
 
         async function scanReroutesForTrip(trip) {
+            if (queueRunning) return;
             if (!trip.is_computed || !trip.route_result || !trip.route_meta) return;
             const meta = trip.route_meta;
             if (!meta.cum || meta.cum.length < 2) return;
@@ -1988,6 +1990,7 @@
             progressWrap.style.display = 'block'; 
             runBtn.disabled = true;
             clearBtn.disabled = true;
+            queueRunning = true;
 
             for (let i = 0; i < selectedTrips.length; i++) {
                 const trip = selectedTrips[i];
@@ -2011,6 +2014,14 @@
                 await refreshLiveTraffic(false);
             } catch (e) {
                 console.error('刷新即時車流失敗:', e);
+            }
+            // 排程結束後逐一重掃改道（避免多車次同時打爆 OSRM）
+            queueRunning = false;
+            Object.keys(rerouteScanTimers).forEach(k => clearTimeout(rerouteScanTimers[k]));
+            for (const trip of selectedTrips) {
+                if (trip.is_computed && trip.route_result) {
+                    await scanReroutesForTrip(trip);
+                }
             }
             renderSidebar();
             renderAllMapLayers();
