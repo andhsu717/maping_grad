@@ -1,19 +1,13 @@
-# ngrok 對外分享的流量政策（Privacy Policy for public tunnel）
-# - basic-auth：訪客必須輸入帳號密碼才能進入（免費方案即支援）
-# - rate-limit：每 IP 每分鐘 60 次請求，避免外人無限消耗你的電腦與 TDX 額度
-#
-# 使用者請修改 credentials 中的帳號與密碼（密碼至少 8 碼）！
-# 修改後需重啟 對外分享.bat 才會生效。
-
 on_http_request:
   - actions:
       - type: basic-auth
         config:
           realm: "SmartLogistics"
           credentials:
-            - "user:merry91165"
+            - "logistics:SmartLog-2026"
       - type: rate-limit
         config:
-          requests: 60
-          window: 1m
-          burst_buffer: 20
+          name: "per-ip-limit"
+          algorithm: "sliding_window"
+          capacity: 60
+          rate: "1m"
