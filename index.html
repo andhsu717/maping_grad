@@ -412,6 +412,7 @@
             font-weight: 700;
             color: #ffffff;
             flex-shrink: 0;
+            cursor: pointer;
             box-shadow: 0 2px 4px rgba(0,0,0,0.15);
         }
         .node-content { flex: 1; min-width: 0; }
@@ -1661,6 +1662,11 @@
             renderTimelineView();
         }
 
+        function flyMapToStation(lat, lon) {
+            if (lat == null || lon == null) return;
+            map.flyTo([lat, lon], 17, { duration: 0.7 });
+        }
+
         function focusTripInTimeline(trip) {
             if (!trip || !trip.is_computed || !trip.route_result) return;
             switchTab('timeline');
@@ -1733,7 +1739,7 @@
 
                 if (item.type === 'DEPOT') {
                     nodeEl.innerHTML = `
-                        <div class="node-dot" style="background: #dc2626;">起</div>
+                        <div class="node-dot" style="background: #dc2626;" onclick="flyMapToStation(${item.lat}, ${item.lon})">起</div>
                         <div class="node-content">
                             <div class="node-title-row">
                                 <span class="node-title">出發點：${item.name}</span>
@@ -1742,7 +1748,7 @@
                     `;
                 } else {
                     nodeEl.innerHTML = `
-                        <div class="node-dot" style="background: ${trip.color};">#${item.seq_no}</div>
+                        <div class="node-dot" style="background: ${trip.color};" onclick="flyMapToStation(${item.lat}, ${item.lon})">#${item.seq_no}</div>
                         <div class="node-content">
                             <div class="node-title-row">
                                 <span class="node-title">${item.address || '無地址資料'}</span>
