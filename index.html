@@ -662,6 +662,10 @@
         const depotLayer = L.featureGroup();
 
         const map = L.map('map').setView([24.2, 120.9], 8);
+        map.createPane('vdCoveragePane');
+        map.getPane('vdCoveragePane').style.zIndex = 450;
+        map.createPane('stopMarkerPane');
+        map.getPane('stopMarkerPane').style.zIndex = 460;
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '&copy; OpenStreetMap contributors'
@@ -1543,12 +1547,14 @@
                             const eff = effectiveVd(cov.vdid);
                             const baseColor = VD_COLORS[eff.color] || VD_COLORS.GRAY;
                             L.polyline(cov.path, {
-                                color: baseColor, weight: 8, opacity: 0.85, lineCap: 'round'
+                                color: baseColor, weight: 8, opacity: 0.85, lineCap: 'round',
+                                pane: 'vdCoveragePane'
                             }).addTo(layerGroup);
                             if (eff.color !== 'GRAY') {
                                 L.polyline(cov.path, {
                                     color: VD_COLORS.GRAY, weight: 8, opacity: 0.9,
-                                    className: 'vd-flow', lineCap: 'round'
+                                    className: 'vd-flow', lineCap: 'round',
+                                    pane: 'vdCoveragePane'
                                 }).addTo(layerGroup);
                             }
                         });
@@ -1559,7 +1565,8 @@
                     const isCancelled = stop.status === 'CANCELLED';
                     const markerColor = isCancelled ? '#94a3b8' : trip.color;
                     const marker = L.circleMarker([stop.lat, stop.lon], {
-                        radius: 6, fillColor: markerColor, color: "#ffffff", weight: 1.5, opacity: 1, fillOpacity: isCancelled ? 0.3 : 0.9
+                        radius: 6, fillColor: markerColor, color: "#ffffff", weight: 1.5, opacity: 1, fillOpacity: isCancelled ? 0.3 : 0.9,
+                        pane: 'stopMarkerPane'
                     });
                     marker.bindPopup(() => createStopPopupContent(stop, trip));
                     marker.on('click', () => focusTripInTimeline(trip));
