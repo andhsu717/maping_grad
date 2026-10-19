@@ -850,6 +850,7 @@ class RouteAlternativesRequest(BaseModel):
     vds: List[RouteAltVd] = []
     counties: List[str] = []
     legs: List[RouteAltLeg] = []
+    applied_windows: List[List[float]] = []  # 已套用改道的 [p1_m, p2_m]，候選視窗與之重疊時自動銜接
 
 
 @app.post("/api/route/alternatives")
@@ -878,6 +879,8 @@ def route_alternatives(req: RouteAlternativesRequest):
     vds = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in req.vds]
     legs_info = {l.leg_index: (l.model_dump() if hasattr(l, "model_dump") else l.dict())
                  for l in req.legs}
+    applied_windows = sorted([[float(w[0]), float(w[1])] for w in (req.applied_windows or [])
+                              if isinstance(w, (list, tuple)) and len(w) >= 2])
 
     # 1) 依有效顏色合併每條 leg 的橘/紅壅塞區間
     by_leg: Dict[int, Dict[str, Any]] = {}
@@ -921,6 +924,13 @@ def route_alternatives(req: RouteAlternativesRequest):
         # 2) P1 = 壅塞前最後一個轉彎路口；P2 = 壅塞後第一個轉彎路口（無緩衝）
         p1 = max([t for t in turns if t <= a], default=0.0)
         p2 = min([t for t in turns if t >= b], default=total_m)
+        # 與已套用改道視窗銜接：前方已改道 → P1 推到其回歸點後；後方已改道 → P2 止於其改道起點前
+        for w in applied_windows:
+            w_p1, w_p2 = w[0], w[1]
+            if w_p2 <= a:
+                p1 = max(p1, w_p2)
+            elif w_p1 >= b:
+                p2 = min(p2, w_p1)
         if p2 - p1 < REROUTE_MIN_WINDOW_M:
             return {**base, "alternatives": [], "skip_reason": "WINDOW_TOO_SHORT"}
         pt1 = _path_point_at(path, cum, p1)
