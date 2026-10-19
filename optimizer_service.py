@@ -9,10 +9,7 @@
 import math
 import bisect
 import os
-import time
-import threading
 import requests
-from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,13 +32,6 @@ HEADERS = {
     "User-Agent": "SmartLogisticsApp/2.0 (Python-FastAPI-Client)",
     "Accept": "application/json"
 }
-
-# OSRM keep-alive 連線與改道候選快取（TTL 對齊前端 10 分鐘車流輪詢）
-_OSRM_SESSION = requests.Session()
-_OSRM_ALT_CACHE: Dict[Tuple[float, float, float, float], Tuple[float, List[Dict[str, Any]]]] = {}
-_OSRM_ALT_CACHE_TTL = 600.0
-_OSRM_ALT_CACHE_MAX = 256
-_OSRM_ALT_CACHE_LOCK = threading.Lock()
 
 # ================= 道路分類與車速規則 =================
 ROAD_RULES = {
@@ -744,10 +734,10 @@ def traffic_live(counties: str = "", force: bool = False):
 
 # ================= 改道備選路徑 (Phase 3) =================
 REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
+REROUTE_MAX_LEGS = 2           # 每次最多處理的壅塞 leg 數
 REROUTE_ALT_MAX = 3            # 每條 leg 最多候選路徑數（自建 OSRM 預設上限 3，超過會回 400）
-REROUTE_MIN_SAVED_MIN = -999.0  # 負省時也照給，供人工比較（必要時調高即回報 NO_TIME_SAVED）
+REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢者，供人工比較）
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
-REROUTE_OSRM_WORKERS = 4       # 平行查詢 OSRM 的執行緒數
 
 
 def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
@@ -821,35 +811,6 @@ def _max_deviation_m(alt_path: List[List[float]], main_path: List[List[float]],
     return max_off, exit_at, rejoin_at
 
 
-def _fetch_osrm_alternatives(pt1: List[float], pt2: List[float]) -> List[Dict[str, Any]]:
-    """向 OSRM 查 P1→P2 備選路徑；命中快取直接回，失敗或無結果回 []。"""
-    key = (round(float(pt1[0]), 5), round(float(pt1[1]), 5),
-           round(float(pt2[0]), 5), round(float(pt2[1]), 5))
-    now = time.time()
-    with _OSRM_ALT_CACHE_LOCK:
-        hit = _OSRM_ALT_CACHE.get(key)
-        if hit and now < hit[0]:
-            return hit[1]
-    routes: List[Dict[str, Any]] = []
-    try:
-        url = (f"{OSRM_BASE_URL}/route/v1/driving/"
-               f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-               f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
-        resp = _OSRM_SESSION.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code == 200:
-            routes = resp.json().get("routes", []) or []
-        else:
-            print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
-    except Exception:
-        pass
-    if routes:  # 只快取成功結果，失敗下次重試
-        with _OSRM_ALT_CACHE_LOCK:
-            if len(_OSRM_ALT_CACHE) >= _OSRM_ALT_CACHE_MAX:
-                _OSRM_ALT_CACHE.clear()
-            _OSRM_ALT_CACHE[key] = (now + _OSRM_ALT_CACHE_TTL, routes)
-    return routes
-
-
 class RouteAltVd(BaseModel):
     vdid: str = ""
     lat: float
@@ -873,17 +834,11 @@ class RouteAlternativesRequest(BaseModel):
     vds: List[RouteAltVd] = []
     counties: List[str] = []
     legs: List[RouteAltLeg] = []
-    applied_windows: List[List[float]] = []  # 已套用改道的 [p1_m, p2_m]，候選視窗與之重疊時自動銜接
 
 
 @app.post("/api/route/alternatives")
 def route_alternatives(req: RouteAlternativesRequest):
-    """對所有壅塞 leg 推算改道點 (P1) 與回歸點 (P2)，回全量候選與無法改道原因。
-
-    skip_reason: null=有候選；"WINDOW_TOO_SHORT"=路徑過短；
-                 "NO_ALTERNATIVE"=無替代路徑（OSRM 失敗/查無路徑/皆與原路重疊）；
-                 "NO_TIME_SAVED"=無法節省時間。
-    """
+    """對壅塞 leg 推算提早改道點 (P1) 與回歸點 (P2)，回最多多條備用路徑與 ETA。"""
     path = req.polyline or []
     if len(path) < 2:
         return {"status": "success", "legs": []}
@@ -902,8 +857,6 @@ def route_alternatives(req: RouteAlternativesRequest):
     vds = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in req.vds]
     legs_info = {l.leg_index: (l.model_dump() if hasattr(l, "model_dump") else l.dict())
                  for l in req.legs}
-    applied_windows = sorted([[float(w[0]), float(w[1])] for w in (req.applied_windows or [])
-                              if isinstance(w, (list, tuple)) and len(w) >= 2])
 
     # 1) 依有效顏色合併每條 leg 的橘/紅壅塞區間
     by_leg: Dict[int, Dict[str, Any]] = {}
@@ -929,40 +882,38 @@ def route_alternatives(req: RouteAlternativesRequest):
 
     ranked = sorted(by_leg.items(),
                     key=lambda kv: (-(kv[1]["worst"] == "RED"), -(kv[1]["b"] - kv[1]["a"])))
+    ranked = ranked[:REROUTE_MAX_LEGS]
     if not ranked:
         return {"status": "success", "legs": []}
 
     merged_main = _vd_intervals_on_path(path, cum, vds)
-    main_total_s = sum(float(x.get("duration_min") or 0.0) * 60.0
-                       for x in legs_info.values())
 
-    def _leg_result(li: int, slot: Dict[str, Any]) -> Dict[str, Any]:
+    out_legs: List[Dict[str, Any]] = []
+    for li, slot in ranked:
         a, b = slot["a"], slot["b"]
-        base: Dict[str, Any] = {
-            "leg_index": li,
-            "a_m": round(a, 1),
-            "b_m": round(b, 1),
-            "current_eta_min": round(main_total_s / 60.0, 1),
-        }
         # 2) P1 = 壅塞前最後一個轉彎路口；P2 = 壅塞後第一個轉彎路口（無緩衝）
         p1 = max([t for t in turns if t <= a], default=0.0)
         p2 = min([t for t in turns if t >= b], default=total_m)
-        # 與已套用改道視窗銜接：前方已改道 → P1 推到其回歸點後；後方已改道 → P2 止於其改道起點前
-        for w in applied_windows:
-            w_p1, w_p2 = w[0], w[1]
-            if w_p2 <= a:
-                p1 = max(p1, w_p2)
-            elif w_p1 >= b:
-                p2 = min(p2, w_p1)
         if p2 - p1 < REROUTE_MIN_WINDOW_M:
-            return {**base, "alternatives": [], "skip_reason": "WINDOW_TOO_SHORT"}
+            continue
         pt1 = _path_point_at(path, cum, p1)
         pt2 = _path_point_at(path, cum, p2)
 
         # 3) OSRM 取 P1→P2 備選
-        routes = _fetch_osrm_alternatives(pt1, pt2)
+        try:
+            url = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                   f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                   f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                routes = resp.json().get("routes", [])
+            else:
+                routes = []
+                print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
+        except Exception:
+            routes = []
         if not routes:
-            return {**base, "alternatives": [], "skip_reason": "NO_ALTERNATIVE"}
+            continue
 
         # 主線 leg 的名目速度與當前（含壅塞）總時間
         leg_info = legs_info.get(li, {})
@@ -973,10 +924,12 @@ def route_alternatives(req: RouteAlternativesRequest):
         leg_nom = ((leg_end - leg_start) / (leg_base_min * 60.0)) if leg_base_min > 0 else 15.0
         main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
         base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
-        total_s = main_total_s if main_total_s > 0 else total_m / max(leg_nom, 1.0)
+        main_total_s = sum(float(x.get("duration_min") or 0.0) * 60.0
+                           for x in legs_info.values())
+        if main_total_s <= 0:
+            main_total_s = total_m / max(leg_nom, 1.0)
 
         alts: List[Dict[str, Any]] = []
-        time_filtered = False
         for rt in routes[:REROUTE_ALT_MAX]:
             alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
             if len(alt_path) < 2:
@@ -996,10 +949,9 @@ def route_alternatives(req: RouteAlternativesRequest):
             alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
             merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
             alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
-            cand_total_s = total_s - main_p1p2_s + alt_p1p2_s
-            saved_min = (total_s - cand_total_s) / 60.0
+            cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
+            saved_min = (main_total_s - cand_total_s) / 60.0
             if saved_min <= REROUTE_MIN_SAVED_MIN:
-                time_filtered = True
                 continue
             alts.append({
                 "seg_polyline": alt_path,
@@ -1017,15 +969,14 @@ def route_alternatives(req: RouteAlternativesRequest):
                 "rejoin_at": rejoin_at
             })
 
-        alts.sort(key=lambda x: -x["saved_min"])
-        if not alts:
-            reason = "NO_TIME_SAVED" if time_filtered else "NO_ALTERNATIVE"
-            return {**base, "alternatives": [], "skip_reason": reason}
-        return {**base, "alternatives": alts, "skip_reason": None}
-
-    workers = min(REROUTE_OSRM_WORKERS, len(ranked))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        out_legs = list(ex.map(lambda kv: _leg_result(kv[0], kv[1]), ranked))
+        if alts:
+            out_legs.append({
+                "leg_index": li,
+                "a_m": round(a, 1),
+                "b_m": round(b, 1),
+                "current_eta_min": round(main_total_s / 60.0, 1),
+                "alternatives": alts
+            })
 
     return {"status": "success", "legs": out_legs}
 
