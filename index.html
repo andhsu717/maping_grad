@@ -644,6 +644,7 @@
         // 官方壅塞等級 1(A)~5(E) 代表速度（無門檻時使用，km/h）
         const VD_LEVEL_FALLBACK_SPEED = { 1: 45, 2: 37, 3: 30, 4: 23, 5: 10 };
         const VD_LEVEL_LABEL = { 1: 'A 順暢', 2: 'B 車多', 3: 'C 壅塞', 4: 'D 嚴重壅塞', 5: 'E 極度壅塞' };
+        const REROUTE_REASON_LABEL = { WINDOW_TOO_SHORT: '路徑過短', NO_ALTERNATIVE: '無替代路徑' };
         const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
 
         let depotStore = []; 
@@ -1391,8 +1392,9 @@
                 }
                 const data = await resp.json();
                 trip.rerouteOptions = (data.legs || []).filter(x => !(trip.appliedReroutes && trip.appliedReroutes[x.leg_index]));
-                const altCount = (trip.rerouteOptions || []).reduce((s, x) => s + (x.alternatives || []).length, 0);
-                console.log(`改道掃描完成 (${trip.trip_key})：${trip.rerouteOptions.length} 條 leg 有建議，共 ${altCount} 條備選`);
+                const withAlts = (trip.rerouteOptions || []).filter(x => x.alternatives && x.alternatives.length).length;
+                const noAlts = (trip.rerouteOptions || []).filter(x => !x.alternatives || !x.alternatives.length).length;
+                console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議、${noAlts} 段無法改道`);
                 renderAllMapLayers();
                 renderTimelineView();
             } catch (err) {
@@ -1803,6 +1805,12 @@
                         });
                         rrPanel.innerHTML = rrHtml;
                         flowContainer.appendChild(rrPanel);
+                    } else if (rrItem && rrItem.state === 'CANNOT_REROUTE' && !(trip.appliedReroutes && trip.appliedReroutes[index])) {
+                        const noPanel = document.createElement('div');
+                        noPanel.className = 'reroute-panel';
+                        const reasonLabel = REROUTE_REASON_LABEL[rrItem.reason] || rrItem.reason || '';
+                        noPanel.innerHTML = `<div class="reroute-title">無法改道（Leg ${index + 1}）</div><div>${reasonLabel}</div>`;
+                        flowContainer.appendChild(noPanel);
                     }
                     if (trip.appliedReroutes && trip.appliedReroutes[index]) {
                         const donePanel = document.createElement('div');

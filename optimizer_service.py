@@ -734,10 +734,11 @@ def traffic_live(counties: str = "", force: bool = False):
 
 # ================= 改道備選路徑 (Phase 3) =================
 REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
-REROUTE_MAX_LEGS = 2           # 每次最多處理的壅塞 leg 數
 REROUTE_ALT_MAX = 3            # 每條 leg 最多候選路徑數（自建 OSRM 預設上限 3，超過會回 400）
 REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢者，供人工比較）
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
+REROUTE_SCOPE_MAX = 3          # 找不到候選時向外擴展的最大階數
+REROUTE_SCOPE_STEP_M = 200.0   # 轉彎稀疏時的固定擴展步進 (公尺)
 
 
 def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
@@ -838,7 +839,7 @@ class RouteAlternativesRequest(BaseModel):
 
 @app.post("/api/route/alternatives")
 def route_alternatives(req: RouteAlternativesRequest):
-    """對壅塞 leg 推算提早改道點 (P1) 與回歸點 (P2)，回最多多條備用路徑與 ETA。"""
+    """對所有壅塞 leg 推算改道點 (P1)/回歸點 (P2)，回全量候選與狀態 (CAN_REROUTE/CANNOT_REROUTE)。"""
     path = req.polyline or []
     if len(path) < 2:
         return {"status": "success", "legs": []}
@@ -880,9 +881,7 @@ def route_alternatives(req: RouteAlternativesRequest):
         if color == "RED":
             slot["worst"] = "RED"
 
-    ranked = sorted(by_leg.items(),
-                    key=lambda kv: (-(kv[1]["worst"] == "RED"), -(kv[1]["b"] - kv[1]["a"])))
-    ranked = ranked[:REROUTE_MAX_LEGS]
+    ranked = sorted(by_leg.items(), key=lambda kv: kv[0])
     if not ranked:
         return {"status": "success", "legs": []}
 
@@ -891,10 +890,23 @@ def route_alternatives(req: RouteAlternativesRequest):
     out_legs: List[Dict[str, Any]] = []
     for li, slot in ranked:
         a, b = slot["a"], slot["b"]
+        # 站點邊界：改道不得跨過本 leg 的站點，也不得侵入相鄰 leg（事件隔離）
+        leg_info = legs_info.get(li, {})
+        leg_start = leg_bounds[li - 1] if 0 < li < len(leg_bounds) else 0.0
+        leg_end = leg_bounds[li] if li < len(leg_bounds) else total_m
+        base: Dict[str, Any] = {
+            "leg_index": li,
+            "a_m": round(a, 1),
+            "b_m": round(b, 1),
+            "alternatives": [],
+        }
         # 2) P1 = 壅塞前最後一個轉彎路口；P2 = 壅塞後第一個轉彎路口（無緩衝）
-        p1 = max([t for t in turns if t <= a], default=0.0)
-        p2 = min([t for t in turns if t >= b], default=total_m)
+        p1 = max([t for t in turns if t <= a], default=leg_start)
+        p2 = min([t for t in turns if t >= b], default=leg_end)
+        p1 = max(p1, leg_start)
+        p2 = min(p2, leg_end)
         if p2 - p1 < REROUTE_MIN_WINDOW_M:
+            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
             continue
         pt1 = _path_point_at(path, cum, p1)
         pt2 = _path_point_at(path, cum, p2)
@@ -913,12 +925,10 @@ def route_alternatives(req: RouteAlternativesRequest):
         except Exception:
             routes = []
         if not routes:
+            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
             continue
 
         # 主線 leg 的名目速度與當前（含壅塞）總時間
-        leg_info = legs_info.get(li, {})
-        leg_start = leg_bounds[li - 1] if 0 < li < len(leg_bounds) else 0.0
-        leg_end = leg_bounds[li] if li < len(leg_bounds) else total_m
         leg_base_min = float(leg_info.get("base_duration_min")
                              or leg_info.get("duration_min") or 0.0)
         leg_nom = ((leg_end - leg_start) / (leg_base_min * 60.0)) if leg_base_min > 0 else 15.0
@@ -971,12 +981,14 @@ def route_alternatives(req: RouteAlternativesRequest):
 
         if alts:
             out_legs.append({
-                "leg_index": li,
-                "a_m": round(a, 1),
-                "b_m": round(b, 1),
+                **base,
+                "state": "CAN_REROUTE",
+                "reason": None,
                 "current_eta_min": round(main_total_s / 60.0, 1),
                 "alternatives": alts
             })
+        else:
+            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
 
     return {"status": "success", "legs": out_legs}
 
