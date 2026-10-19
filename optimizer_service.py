@@ -821,6 +821,23 @@ def _max_deviation_m(alt_path: List[List[float]], alt_cum: List[float],
     return max_off, exit_at, rejoin_at
 
 
+def _capped_route_duration_s(route: Dict[str, Any]) -> float:
+    """OSRM route 依道路等級速限重算的總行駛秒數（與主線 compute_route_with_road_speed 同一套規則）。"""
+    total = 0.0
+    for leg in route.get("legs", []) or []:
+        for step in leg.get("steps", []) or []:
+            d = float(step.get("distance") or 0.0)
+            t = float(step.get("duration") or 0.0)
+            if d <= 0:
+                continue
+            rtype = classify_street(step.get("name", ""), step.get("ref", ""))
+            cap_mps = ROAD_RULES[rtype]["speed_cap_kmh"] / 3.6
+            orig = (d / t) if t > 0 else (cap_mps * 0.8)
+            eff = min(orig, cap_mps)
+            total += (d / eff) if eff > 0 else t
+    return total
+
+
 def _reroute_candidates(path: List[List[float]], cum: List[float],
                         vds: List[Dict[str, Any]], merged_main: List[List[float]],
                         p1: float, p2: float, leg_start: float, leg_end: float,
@@ -831,7 +848,7 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
     try:
         url = (f"{OSRM_BASE_URL}/route/v1/driving/"
                f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-               f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
+               f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=true")
         resp = requests.get(url, headers=HEADERS, timeout=8)
         if resp.status_code == 200:
             routes = resp.json().get("routes", [])
@@ -860,7 +877,7 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, alt_cum, path, cum)
         if max_off <= REROUTE_MIN_DEVIATION_M:
             continue
-        alt_osrm_s = float(rt.get("duration") or 0.0)
+        alt_osrm_s = _capped_route_duration_s(rt) or float(rt.get("duration") or 0.0)
         alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
         merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
         alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
