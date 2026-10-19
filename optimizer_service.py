@@ -9,6 +9,8 @@
 import math
 import bisect
 import os
+import time
+import threading
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any, Optional, Tuple
@@ -33,6 +35,13 @@ HEADERS = {
     "User-Agent": "SmartLogisticsApp/2.0 (Python-FastAPI-Client)",
     "Accept": "application/json"
 }
+
+# OSRM keep-alive 連線與改道候選快取（TTL 對齊前端 10 分鐘車流輪詢）
+_OSRM_SESSION = requests.Session()
+_OSRM_ALT_CACHE: Dict[Tuple[float, float, float, float], Tuple[float, List[Dict[str, Any]]]] = {}
+_OSRM_ALT_CACHE_TTL = 600.0
+_OSRM_ALT_CACHE_MAX = 256
+_OSRM_ALT_CACHE_LOCK = threading.Lock()
 
 # ================= 道路分類與車速規則 =================
 ROAD_RULES = {
@@ -813,18 +822,32 @@ def _max_deviation_m(alt_path: List[List[float]], main_path: List[List[float]],
 
 
 def _fetch_osrm_alternatives(pt1: List[float], pt2: List[float]) -> List[Dict[str, Any]]:
-    """向 OSRM 查 P1→P2 備選路徑；失敗或無結果回 []。"""
+    """向 OSRM 查 P1→P2 備選路徑；命中快取直接回，失敗或無結果回 []。"""
+    key = (round(float(pt1[0]), 5), round(float(pt1[1]), 5),
+           round(float(pt2[0]), 5), round(float(pt2[1]), 5))
+    now = time.time()
+    with _OSRM_ALT_CACHE_LOCK:
+        hit = _OSRM_ALT_CACHE.get(key)
+        if hit and now < hit[0]:
+            return hit[1]
+    routes: List[Dict[str, Any]] = []
     try:
         url = (f"{OSRM_BASE_URL}/route/v1/driving/"
                f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
                f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
-        resp = requests.get(url, headers=HEADERS, timeout=8)
+        resp = _OSRM_SESSION.get(url, headers=HEADERS, timeout=8)
         if resp.status_code == 200:
-            return resp.json().get("routes", []) or []
-        print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
+            routes = resp.json().get("routes", []) or []
+        else:
+            print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
     except Exception:
         pass
-    return []
+    if routes:  # 只快取成功結果，失敗下次重試
+        with _OSRM_ALT_CACHE_LOCK:
+            if len(_OSRM_ALT_CACHE) >= _OSRM_ALT_CACHE_MAX:
+                _OSRM_ALT_CACHE.clear()
+            _OSRM_ALT_CACHE[key] = (now + _OSRM_ALT_CACHE_TTL, routes)
+    return routes
 
 
 class RouteAltVd(BaseModel):
