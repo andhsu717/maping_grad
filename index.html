@@ -705,7 +705,7 @@
                 return;
             }
             if (t.classList && t.classList.contains('reroute-apply-btn')) {
-                applyReroute(t.getAttribute('data-trip'), parseInt(t.getAttribute('data-leg'), 10), parseInt(t.getAttribute('data-alt'), 10));
+                applyReroute(t.getAttribute('data-trip'), t.getAttribute('data-event'), parseInt(t.getAttribute('data-alt'), 10));
                 return;
             }
             if (t.classList && t.classList.contains('tl-cancel-btn')) {
@@ -1231,7 +1231,7 @@
             const byLeg = {};
             coverage.forEach(cov => {
                 if (cov.leg_index == null || cov.s_m == null) return;
-                if (trip.appliedReroutes && trip.appliedReroutes[cov.leg_index]) return; // 已改道 leg 不套用原路壅塞融合
+                if (appliedEventCovers(trip, cov.leg_index, cov.s_m)) return; // 已改道窗不套用原路壅塞融合
                 const slot = byLeg[cov.leg_index] = byLeg[cov.leg_index] || { intervals: [], worst: 'GRAY' };
                 const eff = effectiveVd(cov.vdid);
                 if (!eff.speed || eff.speed <= 0) return;
@@ -1359,7 +1359,7 @@
             });
             const coverage = [];
             (trip.vd_result.coverage || []).forEach(cov => {
-                if (trip.appliedReroutes && trip.appliedReroutes[cov.leg_index]) return;
+                if (appliedEventCovers(trip, cov.leg_index, cov.s_m)) return;
                 const eff = effectiveVd(cov.vdid);
                 coverage.push({ vdid: cov.vdid, s_m: cov.s_m, back_m: cov.back_m, fwd_m: cov.fwd_m, leg_index: cov.leg_index, color: eff.color });
             });
@@ -1391,7 +1391,7 @@
                     return;
                 }
                 const data = await resp.json();
-                trip.rerouteOptions = (data.legs || []).filter(x => !(trip.appliedReroutes && trip.appliedReroutes[x.leg_index]));
+                trip.rerouteOptions = (data.legs || []).filter(x => !(trip.appliedReroutes && trip.appliedReroutes[x.event_id]));
                 const withAlts = (trip.rerouteOptions || []).filter(x => x.alternatives && x.alternatives.length).length;
                 const noAlts = (trip.rerouteOptions || []).filter(x => !x.alternatives || !x.alternatives.length).length;
                 console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議、${noAlts} 段無法改道`);
@@ -1405,13 +1405,27 @@
             }
         }
 
-        function applyReroute(tripKey, legIndex, altIndex) {
+        function appliedEventCovers(trip, legIndex, sM) {
+            if (!trip.appliedReroutes || sM == null) return false;
+            return Object.values(trip.appliedReroutes).some(ap =>
+                ap.leg_index === legIndex && sM >= ap.p1_m && sM <= ap.p2_m);
+        }
+
+        function applyReroute(tripKey, eventId, altIndex) {
             const trip = tripStore[tripKey];
             if (!trip || !trip.route_result || !trip.rerouteOptions) return;
-            const item = trip.rerouteOptions.find(x => x.leg_index === legIndex);
+            const item = trip.rerouteOptions.find(x => x.event_id === eventId);
             if (!item) return;
             const alt = (item.alternatives || [])[altIndex];
             if (!alt || !alt.seg_polyline) return;
+            const legIndex = item.leg_index;
+            // 同 leg 已套用事件若真重疊則擋下（相接允許）
+            const overlaps = Object.values(trip.appliedReroutes || {}).some(ap =>
+                ap.leg_index === legIndex && alt.p1_m < ap.p2_m - 0.5 && alt.p2_m > ap.p1_m + 0.5);
+            if (overlaps) {
+                console.warn(`改道窗與已套用事件重疊，略過 (${eventId})`);
+                return;
+            }
             if (!trip.originalRoute) {
                 trip.originalRoute = {
                     polyline: JSON.parse(JSON.stringify(trip.route_result.polyline || [])),
@@ -1420,18 +1434,18 @@
                 };
             }
             trip.appliedReroutes = trip.appliedReroutes || {};
-            trip.appliedReroutes[legIndex] = { alt_index: altIndex, alt: alt, p1_m: alt.p1_m, p2_m: alt.p2_m };
+            trip.appliedReroutes[eventId] = { event_id: eventId, leg_index: legIndex, alt_index: altIndex, alt: alt, p1_m: alt.p1_m, p2_m: alt.p2_m };
             const newPath = rebuildPolylineWithReroutes(trip);
             if (newPath) trip.route_result.polyline = newPath;
             const leg = (trip.route_result.legs || [])[legIndex];
             const origLeg = (trip.originalRoute.legs || [])[legIndex];
             if (leg && origLeg) {
-                const origBase = (origLeg.base_duration_min != null) ? origLeg.base_duration_min : origLeg.duration_min;
-                leg.base_duration_min = Math.max(0.1, Math.round((origBase - (alt.base_p1p2_min || 0) + (alt.alt_p1p2_min || 0)) * 10) / 10);
+                const curBase = (leg.base_duration_min != null) ? leg.base_duration_min : origLeg.duration_min;
+                leg.base_duration_min = Math.max(0.1, Math.round((curBase - (alt.base_p1p2_min || 0) + (alt.alt_p1p2_min || 0)) * 10) / 10);
                 leg.base_traffic_status = 'GREEN';
             }
             applyVdEta(trip);
-            trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => x.leg_index !== legIndex);
+            trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => x.event_id !== eventId);
             renderSidebar();
             renderAllMapLayers();
             renderTimelineView();
@@ -1768,13 +1782,21 @@
                         <div class="timeline-arrow-head"></div>
                     `;
 
-                    // 改道比較面板
-                    const rrItem = (trip.rerouteOptions || []).find(x => x.leg_index === index);
-                    const hasSuggestion = !!(rrItem && rrItem.alternatives && rrItem.alternatives.length)
-                        && !(trip.appliedReroutes && trip.appliedReroutes[index]);
-                    if (hasSuggestion) {
+                    // 改道比較面板（同一 leg 可有多個事件）
+                    const legItems = (trip.rerouteOptions || []).filter(x => x.leg_index === index);
+                    const legApplied = Object.values(trip.appliedReroutes || {}).filter(ap => ap.leg_index === index);
+                    const suggestItems = legItems.filter(x => x.alternatives && x.alternatives.length);
+                    const noItems = legItems.filter(x => x.state === 'CANNOT_REROUTE');
+                    const bestItem = suggestItems.length
+                        ? suggestItems.reduce((a, b) => {
+                            const ea = Math.min(...a.alternatives.map(t => t.eta_min || 0));
+                            const eb = Math.min(...b.alternatives.map(t => t.eta_min || 0));
+                            return ea <= eb ? a : b;
+                        })
+                        : null;
+                    if (bestItem) {
                         // 有建議路徑：原箭頭資訊不變但稍左移，右側併排一條螢光黃改道箭頭
-                        const bestAlt = rrItem.alternatives.reduce((a, b) => ((a.eta_min || 0) <= (b.eta_min || 0) ? a : b));
+                        const bestAlt = bestItem.alternatives.reduce((a, b) => ((a.eta_min || 0) <= (b.eta_min || 0) ? a : b));
                         const duo = document.createElement('div');
                         duo.className = 'timeline-arrow-duo';
                         arrowEl.classList.add('shifted');
@@ -1794,30 +1816,31 @@
                         flowContainer.appendChild(arrowEl);
                     }
 
-                    if (rrItem && rrItem.alternatives && rrItem.alternatives.length) {
+                    suggestItems.forEach(item => {
                         const rrPanel = document.createElement('div');
                         rrPanel.className = 'reroute-panel';
-                        let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}）</div>`;
-                        rrItem.alternatives.forEach((alt, ai) => {
+                        let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}，壅塞 ${item.a_m}–${item.b_m} m）</div>`;
+                        item.alternatives.forEach((alt, ai) => {
                             const savedTxt = (alt.saved_min < 0) ? `多 ${Math.abs(alt.saved_min).toFixed(1)} 分` : `省 ${alt.saved_min.toFixed(1)} 分`;
-                            rrHtml += `<div class="reroute-row"><span>壅塞原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選${ai + 1}: ${alt.alt_p1p2_min} 分（${savedTxt}）｜ 整趟 ${rrItem.current_eta_min} → ${alt.eta_min} 分</span>`
-                                + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-leg="${index}" data-alt="${ai}">套用</button></div>`;
+                            rrHtml += `<div class="reroute-row"><span>壅塞原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選${ai + 1}: ${alt.alt_p1p2_min} 分（${savedTxt}）｜ 整趟 ${item.current_eta_min} → ${alt.eta_min} 分</span>`
+                                + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}">套用</button></div>`;
                         });
                         rrPanel.innerHTML = rrHtml;
                         flowContainer.appendChild(rrPanel);
-                    } else if (rrItem && rrItem.state === 'CANNOT_REROUTE' && !(trip.appliedReroutes && trip.appliedReroutes[index])) {
+                    });
+                    noItems.forEach(item => {
                         const noPanel = document.createElement('div');
                         noPanel.className = 'reroute-panel';
-                        const reasonLabel = REROUTE_REASON_LABEL[rrItem.reason] || rrItem.reason || '';
-                        noPanel.innerHTML = `<div class="reroute-title">無法改道（Leg ${index + 1}）</div><div>${reasonLabel}</div>`;
+                        const reasonLabel = REROUTE_REASON_LABEL[item.reason] || item.reason || '';
+                        noPanel.innerHTML = `<div class="reroute-title">無法改道（Leg ${index + 1}，壅塞 ${item.a_m}–${item.b_m} m）</div><div>${reasonLabel}</div>`;
                         flowContainer.appendChild(noPanel);
-                    }
-                    if (trip.appliedReroutes && trip.appliedReroutes[index]) {
+                    });
+                    legApplied.forEach(ap => {
                         const donePanel = document.createElement('div');
                         donePanel.className = 'reroute-panel';
-                        donePanel.innerHTML = `<div class="reroute-title">已套用改道（Leg ${index + 1}，省 ${trip.appliedReroutes[index].alt.saved_min} 分）</div>`;
+                        donePanel.innerHTML = `<div class="reroute-title">已套用改道（Leg ${index + 1}，省 ${ap.alt.saved_min} 分）</div>`;
                         flowContainer.appendChild(donePanel);
-                    }
+                    });
                 }
             });
         }
