@@ -790,14 +790,22 @@ def _duration_over(merged: List[List[float]], d0: float, d1: float,
     return total
 
 
-def _max_deviation_m(alt_path: List[List[float]], main_path: List[List[float]],
-                     main_cum: List[float]) -> Tuple[float, List[float], List[float]]:
-    """候選路徑相對主線的最大偏離距離，以及 (第一個偏離點, 最後一個偏離點)。"""
+def _max_deviation_m(alt_path: List[List[float]], alt_cum: List[float],
+                     main_path: List[List[float]], main_cum: List[float],
+                     ignore_m: float = 30.0) -> Tuple[float, List[float], List[float]]:
+    """候選路徑相對主線的最大偏離距離，以及 (第一個偏離點, 最後一個偏離點)。
+
+    忽略起訖 ignore_m 公尺，避免端點吸附到鄰近道路造成的假訊號。
+    """
     max_off = 0.0
     exit_at: List[float] = []
     rejoin_at: List[float] = []
+    total = alt_cum[-1] if alt_cum else 0.0
     step = max(1, len(alt_path) // 60)
     for i in range(0, len(alt_path), step):
+        d = alt_cum[i] if i < len(alt_cum) else total
+        if d < ignore_m or d > total - ignore_m:
+            continue
         pt = alt_path[i]
         off, _ = _project_point_to_path(pt[0], pt[1], main_path, main_cum)
         if off > max_off:
@@ -810,6 +818,71 @@ def _max_deviation_m(alt_path: List[List[float]], main_path: List[List[float]],
         exit_at = alt_path[0]
         rejoin_at = alt_path[-1]
     return max_off, exit_at, rejoin_at
+
+
+def _reroute_candidates(path: List[List[float]], cum: List[float],
+                        vds: List[Dict[str, Any]], merged_main: List[List[float]],
+                        p1: float, p2: float, leg_start: float, leg_end: float,
+                        leg_nom: float, main_total_s: float) -> List[Dict[str, Any]]:
+    """查 OSRM P1→P2 並過濾候選（假備選、無省時），回傳可用備選清單。"""
+    pt1 = _path_point_at(path, cum, p1)
+    pt2 = _path_point_at(path, cum, p2)
+    try:
+        url = (f"{OSRM_BASE_URL}/route/v1/driving/"
+               f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+               f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
+            routes = resp.json().get("routes", [])
+        else:
+            routes = []
+            print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
+    except Exception:
+        routes = []
+    if not routes:
+        return []
+    main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
+    base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
+    alts: List[Dict[str, Any]] = []
+    for rt in routes[:REROUTE_ALT_MAX]:
+        alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
+        if len(alt_path) < 2:
+            continue
+        alt_cum = [0.0]
+        for i in range(1, len(alt_path)):
+            alt_cum.append(alt_cum[-1] + haversine_distance_meters(
+                alt_path[i - 1][0], alt_path[i - 1][1], alt_path[i][0], alt_path[i][1]))
+        alt_total_m = alt_cum[-1]
+        if alt_total_m <= 0:
+            continue
+        # 幾何過濾：與主線幾乎重疊（假備選）才丟棄
+        max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, alt_cum, path, cum)
+        if max_off <= REROUTE_MIN_DEVIATION_M:
+            continue
+        alt_osrm_s = float(rt.get("duration") or 0.0)
+        alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
+        merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
+        alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
+        cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
+        saved_min = (main_total_s - cand_total_s) / 60.0
+        if saved_min <= REROUTE_MIN_SAVED_MIN:
+            continue
+        alts.append({
+            "seg_polyline": alt_path,
+            "p1_m": round(p1, 1),
+            "p2_m": round(p2, 1),
+            "leg_start_m": round(leg_start, 1),
+            "leg_end_m": round(leg_end, 1),
+            "main_p1p2_min": round(main_p1p2_s / 60.0, 1),
+            "base_p1p2_min": round(base_p1p2_s / 60.0, 1),
+            "alt_p1p2_min": round(alt_p1p2_s / 60.0, 1),
+            "eta_min": round(cand_total_s / 60.0, 1),
+            "saved_min": round(saved_min, 1),
+            "distance_km": round(alt_total_m / 1000.0, 2),
+            "exit_at": exit_at,
+            "rejoin_at": rejoin_at,
+        })
+    return alts
 
 
 class RouteAltVd(BaseModel):
@@ -900,94 +973,56 @@ def route_alternatives(req: RouteAlternativesRequest):
             "b_m": round(b, 1),
             "alternatives": [],
         }
-        # 2) P1 = 壅塞前最後一個轉彎路口；P2 = 壅塞後第一個轉彎路口（無緩衝）
-        p1 = max([t for t in turns if t <= a], default=leg_start)
-        p2 = min([t for t in turns if t >= b], default=leg_end)
-        p1 = max(p1, leg_start)
-        p2 = min(p2, leg_end)
-        if p2 - p1 < REROUTE_MIN_WINDOW_M:
-            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
-            continue
-        pt1 = _path_point_at(path, cum, p1)
-        pt2 = _path_point_at(path, cum, p2)
-
-        # 3) OSRM 取 P1→P2 備選
-        try:
-            url = (f"{OSRM_BASE_URL}/route/v1/driving/"
-                   f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-                   f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=false")
-            resp = requests.get(url, headers=HEADERS, timeout=8)
-            if resp.status_code == 200:
-                routes = resp.json().get("routes", [])
-            else:
-                routes = []
-                print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
-        except Exception:
-            routes = []
-        if not routes:
-            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
-            continue
-
         # 主線 leg 的名目速度與當前（含壅塞）總時間
         leg_base_min = float(leg_info.get("base_duration_min")
                              or leg_info.get("duration_min") or 0.0)
         leg_nom = ((leg_end - leg_start) / (leg_base_min * 60.0)) if leg_base_min > 0 else 15.0
-        main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
-        base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
         main_total_s = sum(float(x.get("duration_min") or 0.0) * 60.0
                            for x in legs_info.values())
         if main_total_s <= 0:
             main_total_s = total_m / max(leg_nom, 1.0)
 
-        alts: List[Dict[str, Any]] = []
-        for rt in routes[:REROUTE_ALT_MAX]:
-            alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
-            if len(alt_path) < 2:
-                continue
-            alt_cum = [0.0]
-            for i in range(1, len(alt_path)):
-                alt_cum.append(alt_cum[-1] + haversine_distance_meters(
-                    alt_path[i - 1][0], alt_path[i - 1][1], alt_path[i][0], alt_path[i][1]))
-            alt_total_m = alt_cum[-1]
-            if alt_total_m <= 0:
-                continue
-            # 幾何過濾：與主線幾乎重疊（假備選）才丟棄
-            max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, path, cum)
-            if max_off <= REROUTE_MIN_DEVIATION_M:
-                continue
-            alt_osrm_s = float(rt.get("duration") or 0.0)
-            alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
-            merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
-            alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
-            cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
-            saved_min = (main_total_s - cand_total_s) / 60.0
-            if saved_min <= REROUTE_MIN_SAVED_MIN:
-                continue
-            alts.append({
-                "seg_polyline": alt_path,
-                "p1_m": round(p1, 1),
-                "p2_m": round(p2, 1),
-                "leg_start_m": round(leg_start, 1),
-                "leg_end_m": round(leg_end, 1),
-                "main_p1p2_min": round(main_p1p2_s / 60.0, 1),
-                "base_p1p2_min": round(base_p1p2_s / 60.0, 1),
-                "alt_p1p2_min": round(alt_p1p2_s / 60.0, 1),
-                "eta_min": round(cand_total_s / 60.0, 1),
-                "saved_min": round(saved_min, 1),
-                "distance_km": round(alt_total_m / 1000.0, 2),
-                "exit_at": exit_at,
-                "rejoin_at": rejoin_at
-            })
+        if leg_end - leg_start < REROUTE_MIN_WINDOW_M:
+            out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
+            continue
 
-        if alts:
-            out_legs.append({
-                **base,
-                "state": "CAN_REROUTE",
-                "reason": None,
-                "current_eta_min": round(main_total_s / 60.0, 1),
-                "alternatives": alts
-            })
-        else:
+        # 2) 候選改道點：壅塞前/後取更遠的轉彎；轉彎用盡後以固定步進往兩側外推
+        turns_before = [t for t in turns if t <= a]
+        turns_after = [t for t in turns if t >= b]
+
+        def _cand_p1(k: int) -> float:
+            if k < len(turns_before):
+                return turns_before[-1 - k]
+            ref = turns_before[0] if turns_before else a
+            return ref - REROUTE_SCOPE_STEP_M * (k - len(turns_before) + 1)
+
+        def _cand_p2(k: int) -> float:
+            if k < len(turns_after):
+                return turns_after[k]
+            ref = turns_after[-1] if turns_after else b
+            return ref + REROUTE_SCOPE_STEP_M * (k - len(turns_after) + 1)
+
+        # 3) 動態範圍擴展：取最小 k（最近範圍）且有有效候選者
+        found = False
+        for k in range(REROUTE_SCOPE_MAX + 1):
+            p1 = max(leg_start, min(_cand_p1(k), a))
+            p2 = min(leg_end, max(_cand_p2(k), b))
+            if p2 - p1 < REROUTE_MIN_WINDOW_M:
+                continue
+            alts = _reroute_candidates(path, cum, vds, merged_main, p1, p2,
+                                       leg_start, leg_end, leg_nom, main_total_s)
+            if alts:
+                out_legs.append({
+                    **base,
+                    "state": "CAN_REROUTE",
+                    "reason": None,
+                    "scope": k,
+                    "current_eta_min": round(main_total_s / 60.0, 1),
+                    "alternatives": alts,
+                })
+                found = True
+                break
+        if not found:
             out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
 
     return {"status": "success", "legs": out_legs}
