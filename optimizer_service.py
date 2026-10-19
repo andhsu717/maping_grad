@@ -736,7 +736,7 @@ def traffic_live(counties: str = "", force: bool = False):
 # ================= 改道備選路徑 (Phase 3) =================
 REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
 REROUTE_ALT_MAX = 3            # 每條 leg 最多候選路徑數（自建 OSRM 預設上限 3，超過會回 400）
-REROUTE_MIN_SAVED_MIN = 0.0    # 無省時的候選過濾並回報 NO_TIME_SAVED
+REROUTE_MIN_SAVED_MIN = -999.0  # 負省時也照給，供人工比較（必要時調高即回報 NO_TIME_SAVED）
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
 REROUTE_OSRM_WORKERS = 4       # 平行查詢 OSRM 的執行緒數
 
@@ -984,6 +984,7 @@ def route_alternatives(req: RouteAlternativesRequest):
                 "rejoin_at": rejoin_at
             })
 
+        alts.sort(key=lambda x: -x["saved_min"])
         if not alts:
             reason = "NO_TIME_SAVED" if time_filtered else "NO_ALTERNATIVE"
             return {**base, "alternatives": [], "skip_reason": reason}
