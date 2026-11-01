@@ -940,7 +940,7 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         try:
             url_via = (f"{OSRM_BASE_URL}/route/v1/driving/"
                        f"{pt1[1]:.6f},{pt1[0]:.6f};{via_pt[1]:.6f},{via_pt[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-                       f"?overview=full&geometries=geojson&steps=true&continue_straight=true")
+                       f"?overview=full&geometries=geojson&steps=true")
             resp_via = requests.get(url_via, headers=HEADERS, timeout=6)
             if resp_via.status_code == 200:
                 routes_via = resp_via.json().get("routes", [])
@@ -1013,32 +1013,8 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         if saved_min <= REROUTE_MIN_SAVED_MIN:
             continue
 
-        # 計算替代道路上的 VD 覆蓋片段（供前端套用時無縫繪製車流）
-        alt_coverage: List[Dict[str, Any]] = []
-        for vd in vds:
-            spd = vd.get("speed")
-            lat = vd.get("lat")
-            lon = vd.get("lon")
-            if lat is None or lon is None:
-                continue
-            off, s = _project_point_to_path(float(lat), float(lon), alt_path, alt_cum)
-            if off <= COVERAGE_THRESHOLD_M:
-                a_cov = max(0.0, s - EXTEND_M)
-                b_cov = min(alt_total_m, s + EXTEND_M)
-                seg = _slice_path(alt_path, alt_cum, a_cov, b_cov)
-                if len(seg) >= 2:
-                    vd_spd = float(spd) if spd is not None and float(spd) > 0 else 0.0
-                    alt_coverage.append({
-                        "vdid": vd.get("vdid", ""),
-                        "s_m": round(s, 1),
-                        "path": seg,
-                        "color": classify_vd_color(vd_spd) if vd_spd > 0 else "GRAY",
-                        "speed": vd_spd
-                    })
-
         alts.append({
             "seg_polyline": alt_path,
-            "coverage": alt_coverage,
             "p1_m": round(p1, 1),
             "p2_m": round(p2, 1),
             "leg_start_m": round(leg_start, 1),
@@ -1280,6 +1256,56 @@ def route_alternatives(req: RouteAlternativesRequest):
                 })
 
     return {"status": "success", "legs": out_legs}
+
+
+class RouteReprofileRequest(BaseModel):
+    polyline: List[List[float]] = []
+    counties: List[str] = []
+    leg_boundaries: List[float] = []
+
+
+@app.post("/api/route/reprofile")
+def route_reprofile(req: RouteReprofileRequest, force: bool = False):
+    """套用改道後，將拼接後的新路線幾何送回後端重新進行完整的路況與偵測器比對：
+    1. 計算新路線累積里程 cum
+    2. 呼叫 compute_vd_overlay 重新投影偵測器，替代路上的 VD 正式標記為 on_route: true
+    3. 產出新路徑專屬的覆蓋色帶 vd_coverage，原主線舊色帶自動消除
+    """
+    path = req.polyline or []
+    if len(path) < 2:
+        return {"status": "error", "message": "Polyline too short"}
+
+    cum = [0.0]
+    for i in range(1, len(path)):
+        cum.append(cum[-1] + haversine_distance_meters(
+            path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]))
+
+    profile = {
+        "path": path,
+        "cum": cum,
+        "turn_boundaries": [],
+        "leg_boundaries": req.leg_boundaries if req.leg_boundaries else [cum[-1]],
+        "road_segments": []
+    }
+
+    try:
+        vd_points, vd_coverage = compute_vd_overlay(profile, req.counties, force_live=force)
+    except Exception as e:
+        print(f"[reprofile] compute_vd_overlay 失敗: {e}")
+        vd_points, vd_coverage = [], []
+
+    return {
+        "status": "success",
+        "polyline": path,
+        "counties": req.counties,
+        "vd_points": vd_points,
+        "vd_coverage": vd_coverage,
+        "route_meta": {
+            "cum": cum,
+            "turn_boundaries": [],
+            "leg_boundaries": profile.get("leg_boundaries", [cum[-1]])
+        }
+    }
 
 
 # 首頁回傳（必須在所有 API 路由之後註冊）：

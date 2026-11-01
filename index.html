@@ -1359,13 +1359,13 @@
             buildVdPointIndex();
             const vds = [];
             const seen = new Set();
-            // 包含該縣市的所有偵測器點位，確保替代道路上的 VD 亦能被後端投影覆蓋
-            (trip.vd_result.points || []).forEach(p => {
-                if (seen.has(p.vdid)) return;
-                seen.add(p.vdid);
-                const eff = effectiveVd(p.vdid);
+            (trip.vd_result.coverage || []).forEach(cov => {
+                if (seen.has(cov.vdid)) return;
+                seen.add(cov.vdid);
+                const p = vdPointIndex[cov.vdid];
+                const eff = effectiveVd(cov.vdid);
                 if (!p || p.lat == null || p.lon == null) return;
-                vds.push({ vdid: p.vdid, lat: p.lat, lon: p.lon, speed: eff.speed || 0 });
+                vds.push({ vdid: cov.vdid, lat: p.lat, lon: p.lon, speed: eff.speed || 0 });
             });
             const coverage = [];
             (trip.vd_result.coverage || []).forEach(cov => {
@@ -1423,27 +1423,7 @@
                 ap.leg_index === legIndex && sM >= ap.p1_m && sM <= ap.p2_m);
         }
 
-        // 動態合成當前有效的車流覆蓋段（濾除已繞開之舊路段覆蓋，注入改道新路段覆蓋）
-        function getEffectiveTripCoverage(trip) {
-            if (!trip || !trip.vd_result) return [];
-            const out = [];
-            // 1. 原始路徑覆蓋段：濾除落在已套用改道區間 [p1_m, p2_m] 內的路段（避免空路殘留）
-            (trip.vd_result.coverage || []).forEach(cov => {
-                if (appliedEventCovers(trip, cov.leg_index, cov.s_m)) return;
-                out.push(cov);
-            });
-            // 2. 注入已套用改道隨附的覆蓋段（替代道路上的偵測器即時上色）
-            Object.values(trip.appliedReroutes || {}).forEach(ap => {
-                if (ap.alt && ap.alt.coverage && ap.alt.coverage.length) {
-                    ap.alt.coverage.forEach(acov => {
-                        out.push(acov);
-                    });
-                }
-            });
-            return out;
-        }
-
-        function applyReroute(tripKey, eventId, altIndex) {
+        async function applyReroute(tripKey, eventId, altIndex) {
             const trip = tripStore[tripKey];
             if (!trip || !trip.route_result || !trip.rerouteOptions) return;
             const item = trip.rerouteOptions.find(x => x.event_id === eventId);
@@ -1462,13 +1442,44 @@
                 trip.originalRoute = {
                     polyline: JSON.parse(JSON.stringify(trip.route_result.polyline || [])),
                     cum: (trip.route_meta && trip.route_meta.cum) ? trip.route_meta.cum.slice() : [],
-                    legs: JSON.parse(JSON.stringify(trip.route_result.legs || []))
+                    legs: JSON.parse(JSON.stringify(trip.route_result.legs || [])),
+                    vd_result: JSON.parse(JSON.stringify(trip.vd_result || {})),
+                    route_meta: JSON.parse(JSON.stringify(trip.route_meta || {}))
                 };
             }
             trip.appliedReroutes = trip.appliedReroutes || {};
             trip.appliedReroutes[eventId] = { event_id: eventId, leg_index: legIndex, alt_index: altIndex, alt: alt, p1_m: alt.p1_m, p2_m: alt.p2_m };
             const newPath = rebuildPolylineWithReroutes(trip);
-            if (newPath) trip.route_result.polyline = newPath;
+            if (!newPath) return;
+
+            // 向後端請求新路徑重比對 (Re-profile)，動態重算偵測器顯示、可互動點位與覆蓋線條
+            try {
+                const resp = await fetch(`${API_BASE}/api/route/reprofile`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        polyline: newPath,
+                        counties: (trip.vd_result && trip.vd_result.counties) || [],
+                        leg_boundaries: (trip.route_meta && trip.route_meta.leg_boundaries) || []
+                    })
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    if (data.status === 'success') {
+                        trip.route_result.polyline = data.polyline;
+                        trip.vd_result = {
+                            counties: data.counties,
+                            points: data.vd_points,
+                            coverage: data.vd_coverage
+                        };
+                        trip.route_meta = data.route_meta;
+                    }
+                }
+            } catch (err) {
+                console.error('新路徑重比對失敗:', err);
+                trip.route_result.polyline = newPath;
+            }
+
             const leg = (trip.route_result.legs || [])[legIndex];
             const origLeg = (trip.originalRoute.legs || [])[legIndex];
             if (leg && origLeg) {
@@ -1477,6 +1488,7 @@
                 leg.base_traffic_status = 'GREEN';
             }
             applyVdEta(trip);
+
             // 套用後連動：移除本事件以及被本改道區間涵蓋的其他選項
             trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => {
                 if (x.event_id === eventId) return false;
@@ -1488,6 +1500,8 @@
             renderSidebar();
             renderAllMapLayers();
             renderTimelineView();
+
+            // 持續動態偵測：以新路況與新幾何持續監控改道
             scheduleRerouteScan(trip);
         }
 
@@ -1497,6 +1511,12 @@
                 if (!trip.originalRoute || !trip.appliedReroutes || !Object.keys(trip.appliedReroutes).length) return;
                 any = true;
                 trip.route_result.polyline = JSON.parse(JSON.stringify(trip.originalRoute.polyline));
+                if (trip.originalRoute.vd_result) {
+                    trip.vd_result = JSON.parse(JSON.stringify(trip.originalRoute.vd_result));
+                }
+                if (trip.originalRoute.route_meta) {
+                    trip.route_meta = JSON.parse(JSON.stringify(trip.originalRoute.route_meta));
+                }
                 (trip.originalRoute.legs || []).forEach((ol, i) => {
                     const leg = (trip.route_result.legs || [])[i];
                     if (leg) {
@@ -1505,9 +1525,15 @@
                     }
                 });
                 trip.appliedReroutes = {};
+                trip.originalRoute = null;
                 applyVdEta(trip);
             });
             if (!any) return;
+            renderSidebar();
+            renderAllMapLayers();
+            renderTimelineView();
+            Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) scheduleRerouteScan(t); });
+        }
             renderSidebar();
             renderAllMapLayers();
             renderTimelineView();
@@ -1577,10 +1603,9 @@
                         });
                     }
 
-                    // VD 覆蓋段（動態過濾已改道區間，並納入改道新路段覆蓋）
+                    // VD 覆蓋段（由後端 reprofile 動態更新後的原生覆蓋資料繪製）
                     if (trip.vd_result) {
-                        const activeCoverage = getEffectiveTripCoverage(trip);
-                        activeCoverage.forEach(cov => {
+                        (trip.vd_result.coverage || []).forEach(cov => {
                             const eff = effectiveVd(cov.vdid);
                             const baseColor = VD_COLORS[eff.color] || VD_COLORS.GRAY;
                             L.polyline(cov.path, {
