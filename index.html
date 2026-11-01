@@ -649,7 +649,8 @@
             WINDOW_TOO_SHORT: '壅塞路徑過短（建議依主線行駛）',
             NO_ALTERNATIVE: '無有效替代道路（周邊無合適繞行幹道）',
             NO_TIME_SAVED: '繞行未達省時門檻（替代路段耗時更長）',
-            FAKE_ALTERNATIVE: '無有效避開路線（替代路與原路重疊）'
+            FAKE_ALTERNATIVE: '無有效避開路線（替代路與原路重疊）',
+            REVERTED_ORIGINAL: '已避開原定路線（維持目前改道）'
         };
         const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
 
@@ -1127,6 +1128,7 @@
                 trip.route_meta = null;
                 trip.originalRoute = null;
                 trip.appliedReroutes = {};
+                trip.replacedSegments = [];
                 trip.rerouteOptions = [];
                 (trip.stops || []).forEach(s => { s.status = 'ACTIVE'; });
             });
@@ -1351,6 +1353,31 @@
             return dedupeAdjacentPoints(path);
         }
 
+        function isPathRevertingToReplacedSegment(altPath, replacedSeg) {
+            if (!altPath || altPath.length < 2 || !replacedSeg || replacedSeg.length < 2) return false;
+            const n = altPath.length;
+            const startIdx = Math.max(1, Math.floor(n * 0.2));
+            const endIdx = Math.min(n - 1, Math.floor(n * 0.8));
+            const samplePts = altPath.slice(startIdx, endIdx);
+            if (!samplePts.length) return false;
+
+            let closeCount = 0;
+            for (let i = 0; i < samplePts.length; i++) {
+                const pt = samplePts[i];
+                let minDist = Infinity;
+                for (let j = 0; j < replacedSeg.length; j++) {
+                    const rp = replacedSeg[j];
+                    const dx = (pt[1] - rp[1]) * 102000;
+                    const dy = (pt[0] - rp[0]) * 111000;
+                    const d = Math.hypot(dx, dy);
+                    if (d < minDist) minDist = d;
+                    if (minDist <= 35) break;
+                }
+                if (minDist <= 40) closeCount++;
+            }
+            return (closeCount / samplePts.length) >= 0.70;
+        }
+
         function scheduleRerouteScan(trip) {
             if (!trip || !trip.is_computed || !trip.route_result || !trip.route_meta) return;
             clearTimeout(rerouteScanTimers[trip.trip_key]);
@@ -1405,7 +1432,21 @@
                     return;
                 }
                 const data = await resp.json();
-                trip.rerouteOptions = data.legs || [];
+                const rawLegs = data.legs || [];
+                trip.rerouteOptions = rawLegs.map(item => {
+                    if (trip.replacedSegments && trip.replacedSegments.length && item.alternatives && item.alternatives.length) {
+                        item.alternatives = item.alternatives.filter(alt => {
+                            if (!alt.seg_polyline) return true;
+                            const reverts = trip.replacedSegments.some(seg => isPathRevertingToReplacedSegment(alt.seg_polyline, seg));
+                            return !reverts;
+                        });
+                        if (!item.alternatives.length && item.state === 'CAN_REROUTE') {
+                            item.state = 'CANNOT_REROUTE';
+                            item.reason = 'REVERTED_ORIGINAL';
+                        }
+                    }
+                    return item;
+                });
                 const withAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CAN_REROUTE' && x.alternatives && x.alternatives.length).length;
                 const noAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CANNOT_REROUTE' || !x.alternatives || !x.alternatives.length).length;
                 console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議省時改道，${noAlts} 段未改道`);
@@ -1446,6 +1487,12 @@
             if (!newPath || newPath.length < 2) {
                 console.error('路徑拼接失敗');
                 return;
+            }
+
+            const replacedSeg = slicePathByMileage(currentPath, currentCum, alt.p1_m, alt.p2_m);
+            trip.replacedSegments = trip.replacedSegments || [];
+            if (replacedSeg && replacedSeg.length >= 2) {
+                trip.replacedSegments.push(replacedSeg);
             }
 
             trip.appliedReroutes = trip.appliedReroutes || {};
@@ -1528,6 +1575,7 @@
                     }
                 });
                 trip.appliedReroutes = {};
+                trip.replacedSegments = [];
                 trip.originalRoute = null;
                 applyVdEta(trip);
             });
@@ -1975,6 +2023,7 @@
                 trip.route_meta = result.route_meta || null;
                 trip.originalRoute = null;
                 trip.appliedReroutes = {};
+                trip.replacedSegments = [];
                 trip.rerouteOptions = [];
                 trip.is_computed = true;
                 applyVdEta(trip);
