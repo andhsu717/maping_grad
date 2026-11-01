@@ -1534,11 +1534,6 @@
             renderTimelineView();
             Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) scheduleRerouteScan(t); });
         }
-            renderSidebar();
-            renderAllMapLayers();
-            renderTimelineView();
-            Object.values(tripStore).forEach(t => { if (t.is_computed && t.route_result) scheduleRerouteScan(t); });
-        }
 
         function renderAllMapLayers() {
             Object.keys(tripLayerGroups).forEach(id => {
