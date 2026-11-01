@@ -532,6 +532,7 @@
         .alt-eta-badge { background: rgba(255, 255, 255, 0.95); border: 1px solid #475569; color: #1e293b; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; white-space: nowrap; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); display: flex; align-items: center; gap: 4px; }
         .alt-eta-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
         .reroute-panel { margin: 4px 0 8px 28px; padding: 6px 8px; background: #f5f3ff; border: 1px solid #c4b5fd; border-radius: 6px; font-size: 11px; color: #5b21b6; }
+        .reroute-panel.notice { background: #fffbeb; border-color: #fde68a; color: #92400e; }
         .reroute-title { font-weight: 700; margin-bottom: 4px; }
         .reroute-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 2px; }
         .reroute-apply-btn { font-size: 11px; padding: 2px 8px; border: 1px solid #7c3aed; border-radius: 4px; background: #7c3aed; color: #ffffff; cursor: pointer; }
@@ -644,7 +645,12 @@
         // 官方壅塞等級 1(A)~5(E) 代表速度（無門檻時使用，km/h）
         const VD_LEVEL_FALLBACK_SPEED = { 1: 45, 2: 37, 3: 30, 4: 23, 5: 10 };
         const VD_LEVEL_LABEL = { 1: 'A 順暢', 2: 'B 車多', 3: 'C 壅塞', 4: 'D 嚴重壅塞', 5: 'E 極度壅塞' };
-        const REROUTE_REASON_LABEL = { WINDOW_TOO_SHORT: '路徑過短', NO_ALTERNATIVE: '無替代路徑', NO_TIME_SAVED: '無節省時間（未達 0.5 分鐘）', FAKE_ALTERNATIVE: '無有效替代路徑' };
+        const REROUTE_REASON_LABEL = {
+            WINDOW_TOO_SHORT: '壅塞路徑過短（建議依主線行駛）',
+            NO_ALTERNATIVE: '無有效替代道路（周邊無合適繞行幹道）',
+            NO_TIME_SAVED: '繞行未達省時門檻（替代路段耗時更長）',
+            FAKE_ALTERNATIVE: '無有效避開路線（替代路與原路重疊）'
+        };
         const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
 
         let depotStore = []; 
@@ -1396,12 +1402,11 @@
                 }
                 const data = await resp.json();
                 trip.rerouteOptions = (data.legs || []).filter(x =>
-                    x.state === 'CAN_REROUTE' &&
-                    x.alternatives && x.alternatives.some(a => a.saved_min >= 0.5) &&
                     !(trip.appliedReroutes && trip.appliedReroutes[x.event_id])
                 );
-                const withAlts = (trip.rerouteOptions || []).length;
-                console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議省時改道`);
+                const withAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CAN_REROUTE' && x.alternatives && x.alternatives.length).length;
+                const noAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CANNOT_REROUTE' || !x.alternatives || !x.alternatives.length).length;
+                console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議省時改道，${noAlts} 段未改道`);
                 renderAllMapLayers();
                 renderTimelineView();
             } catch (err) {
@@ -1452,7 +1457,14 @@
                 leg.base_traffic_status = 'GREEN';
             }
             applyVdEta(trip);
-            trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => x.event_id !== eventId);
+            // 套用後連動：移除本事件以及被本改道區間涵蓋的其他選項
+            trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => {
+                if (x.event_id === eventId) return false;
+                if (x.leg_index === legIndex && x.a_m >= alt.p1_m - 30.0 && x.b_m <= alt.p2_m + 30.0) {
+                    return false;
+                }
+                return true;
+            });
             renderSidebar();
             renderAllMapLayers();
             renderTimelineView();
@@ -1793,10 +1805,12 @@
                         <div class="timeline-arrow-head"></div>
                     `;
 
-                    // 改道比較面板（僅顯示有節省 0.5 分鐘以上的建議，不顯示無法改道）
+                    // 改道面板（包含有效省時改道建議，以及壅塞時未改道之原因提示）
                     const legItems = (trip.rerouteOptions || []).filter(x => x.leg_index === index);
                     const legApplied = Object.values(trip.appliedReroutes || {}).filter(ap => ap.leg_index === index);
-                    const suggestItems = legItems.filter(x => x.alternatives && x.alternatives.some(a => a.saved_min >= 0.5));
+                    const suggestItems = legItems.filter(x => x.state === 'CAN_REROUTE' && x.alternatives && x.alternatives.some(a => a.saved_min >= 0.5));
+                    const noItems = legItems.filter(x => x.state === 'CANNOT_REROUTE' || (x.state === 'CAN_REROUTE' && (!x.alternatives || !x.alternatives.length)));
+
                     const bestItem = suggestItems.length
                         ? suggestItems.reduce((a, b) => {
                             const ea = Math.min(...a.alternatives.map(t => t.eta_min || 0));
@@ -1814,10 +1828,12 @@
                         duo.appendChild(arrowEl);
                         const rrArrow = document.createElement('div');
                         rrArrow.className = 'timeline-arrow-wrap reroute';
+                        const isComb = bestItem.event_type === 'COMBINED';
+                        const badgeLabel = isComb ? `建議整合改道：省 ${bestAlt.saved_min.toFixed(1)} 分` : `建議改道：省 ${bestAlt.saved_min.toFixed(1)} 分`;
                         rrArrow.innerHTML = `
                             <div class="timeline-arrow-line"></div>
                             <div class="timeline-arrow-badge">
-                                <span>建議改道：省 ${bestAlt.saved_min.toFixed(1)} 分</span>
+                                <span>${badgeLabel}</span>
                             </div>
                             <div class="timeline-arrow-head"></div>
                         `;
@@ -1827,12 +1843,17 @@
                         flowContainer.appendChild(arrowEl);
                     }
 
+                    // 1. 渲染有效改道建議面板
                     suggestItems.forEach(item => {
                         const validAlts = item.alternatives.filter(alt => alt.saved_min >= 0.5);
                         if (!validAlts.length) return;
                         const rrPanel = document.createElement('div');
                         rrPanel.className = 'reroute-panel';
-                        let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}）</div>`;
+                        const isComb = item.event_type === 'COMBINED';
+                        const titleText = isComb
+                            ? `建議整合改道（Leg ${index + 1}，避開連續壅塞）`
+                            : `建議改道（Leg ${index + 1}）`;
+                        let rrHtml = `<div class="reroute-title">${titleText}</div>`;
                         validAlts.forEach((alt, ai) => {
                             rrHtml += `<div class="reroute-row"><span>備選 ${ai + 1}：省 ${alt.saved_min.toFixed(1)} 分（整趟 ${item.current_eta_min} → ${alt.eta_min} 分）</span>`
                                 + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}">套用</button></div>`;
@@ -1840,6 +1861,21 @@
                         rrPanel.innerHTML = rrHtml;
                         flowContainer.appendChild(rrPanel);
                     });
+
+                    // 2. 若該路段有壅塞但評估後無有效改道，顯示原因提示卡片（地圖保持不畫）
+                    if (!suggestItems.length && !legApplied.length) {
+                        noItems.forEach(item => {
+                            const noPanel = document.createElement('div');
+                            noPanel.className = 'reroute-panel notice';
+                            const reasonText = REROUTE_REASON_LABEL[item.reason] || item.reason || '建議依主線行駛';
+                            const isComb = item.event_type === 'COMBINED';
+                            const subDesc = isComb ? '連續壅塞路段' : `壅塞路段 (${item.a_m}–${item.b_m}m)`;
+                            noPanel.innerHTML = `<div class="reroute-title" style="color:#b45309;">⚠️ 壅塞未改道（Leg ${index + 1}）</div><div style="font-size:11px; color:#78350f; line-height:1.4;">${subDesc}：${reasonText}</div>`;
+                            flowContainer.appendChild(noPanel);
+                        });
+                    }
+
+                    // 3. 已套用改道面板
                     legApplied.forEach(ap => {
                         const donePanel = document.createElement('div');
                         donePanel.className = 'reroute-panel';

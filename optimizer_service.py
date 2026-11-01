@@ -889,6 +889,18 @@ def get_via_point(p1: List[float], p2: List[float],
     return [offset_lat, offset_lon]
 
 
+def _has_uturn(route: Dict[str, Any]) -> bool:
+    """檢查 route 中的 maneuvers 是否包含迴轉 (U-turn) 動作，防止走進死巷調頭。"""
+    for leg in route.get("legs", []) or []:
+        for step in leg.get("steps", []) or []:
+            maneuver = step.get("maneuver") or {}
+            mtype = str(maneuver.get("type", "")).lower()
+            mmod = str(maneuver.get("modifier", "")).lower()
+            if mtype == "uturn" or mmod == "uturn":
+                return True
+    return False
+
+
 def _reroute_candidates(path: List[List[float]], cum: List[float],
                         vds: List[Dict[str, Any]], merged_main: List[List[float]],
                         p1: float, p2: float, leg_start: float, leg_end: float,
@@ -918,7 +930,7 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
     except Exception:
         pass
 
-    # 策略 2：市區側向避開點 P_via（向右與向左側推 600m，強制繞行）
+    # 策略 2：市區側向避開點 P_via（向右與向左側推 600m，強制繞行，且強制 continue_straight=true 防迴轉）
     for side in ("right", "left"):
         via_pt = get_via_point(pt1, pt2, offset_meters=600.0, side=side)
         d_v1 = haversine_distance_meters(pt1[0], pt1[1], via_pt[0], via_pt[1])
@@ -928,7 +940,7 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         try:
             url_via = (f"{OSRM_BASE_URL}/route/v1/driving/"
                        f"{pt1[1]:.6f},{pt1[0]:.6f};{via_pt[1]:.6f},{via_pt[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-                       f"?overview=full&geometries=geojson&steps=true")
+                       f"?overview=full&geometries=geojson&steps=true&continue_straight=true")
             resp_via = requests.get(url_via, headers=HEADERS, timeout=6)
             if resp_via.status_code == 200:
                 routes_via = resp_via.json().get("routes", [])
@@ -959,6 +971,10 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
 
     seen_geoms = set()
     for rt in raw_routes:
+        # 防迴轉檢查：包含 U-turn 動作直接剃除
+        if _has_uturn(rt):
+            continue
+
         alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
         if len(alt_path) < 2:
             continue
@@ -1083,30 +1099,59 @@ def route_alternatives(req: RouteAlternativesRequest):
     if not by_leg:
         return {"status": "success", "legs": []}
 
-    # 分群：同一 leg 內間隔 < REROUTE_CLUSTER_GAP_M 才合併，其餘各自獨立成事件
-    leg_clusters: Dict[int, List[Dict[str, Any]]] = {}
+    # 分群：同時產生「單點局部壅塞」與「連續重疊/銜接整合大路段」雙層候選
+    leg_events: Dict[int, List[Dict[str, Any]]] = {}
     for li, ivs in by_leg.items():
         ivs.sort(key=lambda x: x[0])
-        clusters: List[Dict[str, Any]] = []
+        # 1. 單點獨立事件（間隔 < 50m 去重合併，避免同偵測器重複）
+        singles: List[Dict[str, Any]] = []
         for a, b, color in ivs:
-            if clusters and a - clusters[-1]["b"] < REROUTE_CLUSTER_GAP_M:
-                clusters[-1]["b"] = max(clusters[-1]["b"], b)
+            if singles and a - singles[-1]["b"] < 50.0:
+                singles[-1]["b"] = max(singles[-1]["b"], b)
                 if color == "RED":
-                    clusters[-1]["worst"] = "RED"
+                    singles[-1]["worst"] = "RED"
             else:
-                clusters.append({"a": a, "b": b, "worst": color})
-        leg_clusters[li] = clusters
+                singles.append({"a": a, "b": b, "worst": color, "event_type": "SINGLE"})
+
+        slots: List[Dict[str, Any]] = list(singles)
+
+        # 2. 連續重疊或銜接（間隔 <= 300m）整合為「連續壅塞大路段」
+        if len(singles) >= 2:
+            comb_groups: List[List[Dict[str, Any]]] = []
+            cur_group = [singles[0]]
+            for nxt in singles[1:]:
+                if nxt["a"] - cur_group[-1]["b"] <= 300.0:
+                    cur_group.append(nxt)
+                else:
+                    if len(cur_group) >= 2:
+                        comb_groups.append(cur_group)
+                    cur_group = [nxt]
+            if len(cur_group) >= 2:
+                comb_groups.append(cur_group)
+
+            for grp in comb_groups:
+                c_a = grp[0]["a"]
+                c_b = max(g["b"] for g in grp)
+                worst_c = "RED" if any(g["worst"] == "RED" for g in grp) else "ORANGE"
+                slots.append({
+                    "a": c_a,
+                    "b": c_b,
+                    "worst": worst_c,
+                    "event_type": "COMBINED",
+                    "tag": f"整合連續壅塞（涵蓋 {len(grp)} 處塞車）"
+                })
+
+        leg_events[li] = slots
 
     merged_main = _vd_intervals_on_path(path, cum, vds)
 
     out_legs: List[Dict[str, Any]] = []
-    for li in sorted(leg_clusters.keys()):
-        clusters = leg_clusters[li]
-        # 站點邊界：改道不得跨過本 leg 的站點，也不得侵入相鄰 leg（事件隔離）
+    for li in sorted(leg_events.keys()):
+        slots = leg_events[li]
         leg_info = legs_info.get(li, {})
         leg_start = leg_bounds[li - 1] if 0 < li < len(leg_bounds) else 0.0
         leg_end = leg_bounds[li] if li < len(leg_bounds) else total_m
-        # 主線 leg 的名目速度與當前（含壅塞）總時間
+
         leg_base_min = float(leg_info.get("base_duration_min")
                              or leg_info.get("duration_min") or 0.0)
         leg_nom = ((leg_end - leg_start) / (leg_base_min * 60.0)) if leg_base_min > 0 else 15.0
@@ -1115,19 +1160,21 @@ def route_alternatives(req: RouteAlternativesRequest):
         if main_total_s <= 0:
             main_total_s = total_m / max(leg_nom, 1.0)
 
-        for ci, slot in enumerate(clusters):
+        for slot in slots:
             a, b = slot["a"], slot["b"]
-            # 事件隔離：可展範圍以與相鄰 cluster 的 gap 中點為界（最外側取 leg 邊界）
+            etype = slot.get("event_type", "SINGLE")
+            etag = slot.get("tag", "")
+
+            # 改道範圍：以本 Leg 邊界為限，確保不越站配送
             evt_start = leg_start
             evt_end = leg_end
-            if ci > 0:
-                evt_start = max(leg_start, (clusters[ci - 1]["b"] + a) / 2.0)
-            if ci < len(clusters) - 1:
-                evt_end = min(leg_end, (b + clusters[ci + 1]["a"]) / 2.0)
 
+            ev_code = "c" if etype == "COMBINED" else "s"
             base: Dict[str, Any] = {
                 "leg_index": li,
-                "event_id": f"{li}:{round(a, 1)}",
+                "event_id": f"{li}:{ev_code}:{round(a, 1)}",
+                "event_type": etype,
+                "tag": etag,
                 "a_m": round(a, 1),
                 "b_m": round(b, 1),
                 "alternatives": [],
