@@ -1241,7 +1241,6 @@
             const byLeg = {};
             coverage.forEach(cov => {
                 if (cov.leg_index == null || cov.s_m == null) return;
-                if (appliedEventCovers(trip, cov.leg_index, cov.s_m)) return; // 已改道窗不套用原路壅塞融合
                 const slot = byLeg[cov.leg_index] = byLeg[cov.leg_index] || { intervals: [], worst: 'GRAY' };
                 const eff = effectiveVd(cov.vdid);
                 if (!eff.speed || eff.speed <= 0) return;
@@ -1329,21 +1328,27 @@
             return out.filter(Boolean);
         }
 
-        function rebuildPolylineWithReroutes(trip) {
-            const orig = trip.originalRoute;
-            if (!orig || !orig.polyline || !orig.cum || !orig.cum.length) return null;
-            const applied = Object.keys(trip.appliedReroutes || {}).map(k => trip.appliedReroutes[k]).sort((a, b) => a.p1_m - b.p1_m);
-            if (!applied.length) return null;
+        function dedupeAdjacentPoints(pts) {
+            if (!pts || !pts.length) return [];
+            const res = [pts[0]];
+            for (let i = 1; i < pts.length; i++) {
+                const prev = res[res.length - 1];
+                const cur = pts[i];
+                if (Math.abs(prev[0] - cur[0]) > 1e-7 || Math.abs(prev[1] - cur[1]) > 1e-7) {
+                    res.push(cur);
+                }
+            }
+            return res;
+        }
+
+        function splicePathSegment(currentPath, currentCum, p1_m, p2_m, altSeg) {
+            if (!currentPath || !currentCum || currentCum.length !== currentPath.length) return null;
+            const total = currentCum[currentCum.length - 1];
             let path = [];
-            let cursor = 0;
-            const total = orig.cum[orig.cum.length - 1];
-            applied.forEach(ap => {
-                path = path.concat(slicePathByMileage(orig.polyline, orig.cum, cursor, ap.p1_m));
-                path = path.concat(ap.alt.seg_polyline || []);
-                cursor = ap.p2_m;
-            });
-            path = path.concat(slicePathByMileage(orig.polyline, orig.cum, cursor, total));
-            return path.length > 1 ? path : null;
+            path = path.concat(slicePathByMileage(currentPath, currentCum, 0, p1_m));
+            path = path.concat(altSeg || []);
+            path = path.concat(slicePathByMileage(currentPath, currentCum, p2_m, total));
+            return dedupeAdjacentPoints(path);
         }
 
         function scheduleRerouteScan(trip) {
@@ -1369,7 +1374,6 @@
             });
             const coverage = [];
             (trip.vd_result.coverage || []).forEach(cov => {
-                if (appliedEventCovers(trip, cov.leg_index, cov.s_m)) return;
                 const eff = effectiveVd(cov.vdid);
                 coverage.push({ vdid: cov.vdid, s_m: cov.s_m, back_m: cov.back_m, fwd_m: cov.fwd_m, leg_index: cov.leg_index, color: eff.color });
             });
@@ -1386,7 +1390,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        polyline: (trip.originalRoute && trip.originalRoute.polyline) ? trip.originalRoute.polyline : trip.route_result.polyline,
+                        polyline: trip.route_result.polyline,
                         cum: meta.cum,
                         turn_boundaries: meta.turn_boundaries || [],
                         leg_boundaries: meta.leg_boundaries || [],
@@ -1401,9 +1405,7 @@
                     return;
                 }
                 const data = await resp.json();
-                trip.rerouteOptions = (data.legs || []).filter(x =>
-                    !(trip.appliedReroutes && trip.appliedReroutes[x.event_id])
-                );
+                trip.rerouteOptions = data.legs || [];
                 const withAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CAN_REROUTE' && x.alternatives && x.alternatives.length).length;
                 const noAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CANNOT_REROUTE' || !x.alternatives || !x.alternatives.length).length;
                 console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議省時改道，${noAlts} 段未改道`);
@@ -1417,12 +1419,6 @@
             }
         }
 
-        function appliedEventCovers(trip, legIndex, sM) {
-            if (!trip.appliedReroutes || sM == null) return false;
-            return Object.values(trip.appliedReroutes).some(ap =>
-                ap.leg_index === legIndex && sM >= ap.p1_m && sM <= ap.p2_m);
-        }
-
         async function applyReroute(tripKey, eventId, altIndex) {
             const trip = tripStore[tripKey];
             if (!trip || !trip.route_result || !trip.rerouteOptions) return;
@@ -1431,13 +1427,8 @@
             const alt = (item.alternatives || [])[altIndex];
             if (!alt || !alt.seg_polyline) return;
             const legIndex = item.leg_index;
-            // 同 leg 已套用事件若真重疊則擋下（相接允許）
-            const overlaps = Object.values(trip.appliedReroutes || {}).some(ap =>
-                ap.leg_index === legIndex && alt.p1_m < ap.p2_m - 0.5 && alt.p2_m > ap.p1_m + 0.5);
-            if (overlaps) {
-                console.warn(`改道窗與已套用事件重疊，略過 (${eventId})`);
-                return;
-            }
+
+            // 備份初始原始路徑（僅在第一次改道時儲存，供清除工具一鍵恢復完整原定計畫）
             if (!trip.originalRoute) {
                 trip.originalRoute = {
                     polyline: JSON.parse(JSON.stringify(trip.route_result.polyline || [])),
@@ -1447,10 +1438,27 @@
                     route_meta: JSON.parse(JSON.stringify(trip.route_meta || {}))
                 };
             }
+
+            // 將替代路段動態拼接至當前最新生效之路徑中（支援持續接續改道）
+            const currentPath = trip.route_result.polyline;
+            const currentCum = (trip.route_meta && trip.route_meta.cum) ? trip.route_meta.cum : [];
+            const newPath = splicePathSegment(currentPath, currentCum, alt.p1_m, alt.p2_m, alt.seg_polyline);
+            if (!newPath || newPath.length < 2) {
+                console.error('路徑拼接失敗');
+                return;
+            }
+
             trip.appliedReroutes = trip.appliedReroutes || {};
-            trip.appliedReroutes[eventId] = { event_id: eventId, leg_index: legIndex, alt_index: altIndex, alt: alt, p1_m: alt.p1_m, p2_m: alt.p2_m };
-            const newPath = rebuildPolylineWithReroutes(trip);
-            if (!newPath) return;
+            trip.appliedReroutes[eventId] = {
+                event_id: eventId,
+                leg_index: legIndex,
+                alt_index: altIndex,
+                alt: alt,
+                p1_m: alt.p1_m,
+                p2_m: alt.p2_m
+            };
+
+            const stopCoords = (trip.route_result.sequence || []).map(s => [s.lat, s.lon]);
 
             // 向後端請求新路徑重比對 (Re-profile)，動態重算偵測器顯示、可互動點位與覆蓋線條
             try {
@@ -1460,7 +1468,8 @@
                     body: JSON.stringify({
                         polyline: newPath,
                         counties: (trip.vd_result && trip.vd_result.counties) || [],
-                        leg_boundaries: (trip.route_meta && trip.route_meta.leg_boundaries) || []
+                        leg_boundaries: (trip.route_meta && trip.route_meta.leg_boundaries) || [],
+                        stop_coordinates: stopCoords
                     })
                 });
                 if (resp.ok) {
@@ -1489,14 +1498,8 @@
             }
             applyVdEta(trip);
 
-            // 套用後連動：移除本事件以及被本改道區間涵蓋的其他選項
-            trip.rerouteOptions = (trip.rerouteOptions || []).filter(x => {
-                if (x.event_id === eventId) return false;
-                if (x.leg_index === legIndex && x.a_m >= alt.p1_m - 30.0 && x.b_m <= alt.p2_m + 30.0) {
-                    return false;
-                }
-                return true;
-            });
+            // 清空舊改道選項，等待新路況與幾何的持續偵測掃描
+            trip.rerouteOptions = [];
             renderSidebar();
             renderAllMapLayers();
             renderTimelineView();
@@ -1870,7 +1873,9 @@
                         const rrArrow = document.createElement('div');
                         rrArrow.className = 'timeline-arrow-wrap reroute';
                         const isComb = bestItem.event_type === 'COMBINED';
-                        const badgeLabel = isComb ? `建議整合改道：省 ${bestAlt.saved_min.toFixed(1)} 分` : `建議改道：省 ${bestAlt.saved_min.toFixed(1)} 分`;
+                        const badgeLabel = legApplied.length
+                            ? (isComb ? `建議接續整合改道：省 ${bestAlt.saved_min.toFixed(1)} 分` : `建議接續改道：省 ${bestAlt.saved_min.toFixed(1)} 分`)
+                            : (isComb ? `建議整合改道：省 ${bestAlt.saved_min.toFixed(1)} 分` : `建議改道：省 ${bestAlt.saved_min.toFixed(1)} 分`);
                         rrArrow.innerHTML = `
                             <div class="timeline-arrow-line"></div>
                             <div class="timeline-arrow-badge">
@@ -1884,16 +1889,24 @@
                         flowContainer.appendChild(arrowEl);
                     }
 
-                    // 1. 渲染有效改道建議面板
+                    // 1. 已套用改道面板
+                    legApplied.forEach(ap => {
+                        const donePanel = document.createElement('div');
+                        donePanel.className = 'reroute-panel';
+                        donePanel.innerHTML = `<div class="reroute-title" style="color:#059669;">✓ 已套用改道（Leg ${index + 1}，省 ${ap.alt.saved_min.toFixed(1)} 分）</div>`;
+                        flowContainer.appendChild(donePanel);
+                    });
+
+                    // 2. 渲染有效或接續改道建議面板
                     suggestItems.forEach(item => {
                         const validAlts = item.alternatives.filter(alt => alt.saved_min >= 0.5);
                         if (!validAlts.length) return;
                         const rrPanel = document.createElement('div');
                         rrPanel.className = 'reroute-panel';
                         const isComb = item.event_type === 'COMBINED';
-                        const titleText = isComb
-                            ? `建議整合改道（Leg ${index + 1}，避開連續壅塞）`
-                            : `建議改道（Leg ${index + 1}）`;
+                        const titleText = legApplied.length
+                            ? (isComb ? `建議接續整合改道（Leg ${index + 1}，避開連續壅塞）` : `建議接續改道（Leg ${index + 1}）`)
+                            : (isComb ? `建議整合改道（Leg ${index + 1}，避開連續壅塞）` : `建議改道（Leg ${index + 1}）`);
                         let rrHtml = `<div class="reroute-title">${titleText}</div>`;
                         validAlts.forEach((alt, ai) => {
                             rrHtml += `<div class="reroute-row"><span>備選 ${ai + 1}：省 ${alt.saved_min.toFixed(1)} 分（整趟 ${item.current_eta_min} → ${alt.eta_min} 分）</span>`
@@ -1903,26 +1916,19 @@
                         flowContainer.appendChild(rrPanel);
                     });
 
-                    // 2. 若該路段有壅塞但評估後無有效改道，顯示原因提示卡片（地圖保持不畫）
-                    if (!suggestItems.length && !legApplied.length) {
+                    // 3. 若該路段有壅塞但評估後無更優改道，顯示原因提示卡片（地圖保持不畫）
+                    if (!suggestItems.length) {
                         noItems.forEach(item => {
                             const noPanel = document.createElement('div');
                             noPanel.className = 'reroute-panel notice';
                             const reasonText = REROUTE_REASON_LABEL[item.reason] || item.reason || '建議依主線行駛';
                             const isComb = item.event_type === 'COMBINED';
                             const subDesc = isComb ? '連續壅塞路段' : `壅塞路段 (${item.a_m}–${item.b_m}m)`;
-                            noPanel.innerHTML = `<div class="reroute-title" style="color:#b45309;">⚠️ 壅塞未改道（Leg ${index + 1}）</div><div style="font-size:11px; color:#78350f; line-height:1.4;">${subDesc}：${reasonText}</div>`;
+                            const titleText = legApplied.length ? `⚠️ 套用後路段仍有壅塞（Leg ${index + 1}）` : `⚠️ 壅塞未改道（Leg ${index + 1}）`;
+                            noPanel.innerHTML = `<div class="reroute-title" style="color:#b45309;">${titleText}</div><div style="font-size:11px; color:#78350f; line-height:1.4;">${subDesc}：${reasonText}</div>`;
                             flowContainer.appendChild(noPanel);
                         });
                     }
-
-                    // 3. 已套用改道面板
-                    legApplied.forEach(ap => {
-                        const donePanel = document.createElement('div');
-                        donePanel.className = 'reroute-panel';
-                        donePanel.innerHTML = `<div class="reroute-title">已套用改道（Leg ${index + 1}，省 ${ap.alt.saved_min} 分）</div>`;
-                        flowContainer.appendChild(donePanel);
-                    });
                 }
             });
         }

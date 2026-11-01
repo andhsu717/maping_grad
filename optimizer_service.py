@@ -1258,18 +1258,49 @@ def route_alternatives(req: RouteAlternativesRequest):
     return {"status": "success", "legs": out_legs}
 
 
+def detect_turn_boundaries(path: List[List[float]], cum: List[float], min_angle_deg: float = 35.0) -> List[float]:
+    """從折線幾何中，根據前後向量轉向角 (>35度) 推算路口轉彎點里程。"""
+    turns: List[float] = []
+    if len(path) < 3 or len(cum) != len(path):
+        return turns
+    for i in range(1, len(path) - 1):
+        d_prev = cum[i] - cum[i - 1]
+        d_next = cum[i + 1] - cum[i]
+        if d_prev < 3.0 or d_next < 3.0:
+            continue
+        lat0, lon0 = path[i - 1]
+        lat1, lon1 = path[i]
+        lat2, lon2 = path[i + 1]
+        v1_y = lat1 - lat0
+        v1_x = (lon1 - lon0) * math.cos(math.radians(lat1))
+        v2_y = lat2 - lat1
+        v2_x = (lon2 - lon1) * math.cos(math.radians(lat1))
+        heading1 = math.atan2(v1_y, v1_x)
+        heading2 = math.atan2(v2_y, v2_x)
+        diff = abs(math.degrees(heading2 - heading1))
+        if diff > 180.0:
+            diff = 360.0 - diff
+        if diff >= min_angle_deg:
+            if not turns or (cum[i] - turns[-1] >= 25.0):
+                turns.append(round(cum[i], 1))
+    return turns
+
+
 class RouteReprofileRequest(BaseModel):
     polyline: List[List[float]] = []
     counties: List[str] = []
     leg_boundaries: List[float] = []
+    stop_coordinates: List[List[float]] = []
 
 
 @app.post("/api/route/reprofile")
 def route_reprofile(req: RouteReprofileRequest, force: bool = False):
     """套用改道後，將拼接後的新路線幾何送回後端重新進行完整的路況與偵測器比對：
     1. 計算新路線累積里程 cum
-    2. 呼叫 compute_vd_overlay 重新投影偵測器，替代路上的 VD 正式標記為 on_route: true
-    3. 產出新路徑專屬的覆蓋色帶 vd_coverage，原主線舊色帶自動消除
+    2. 自動幾何偵測路口轉彎點 turn_boundaries
+    3. 依據站點精確投影計算各 leg 終點里程 leg_boundaries
+    4. 呼叫 compute_vd_overlay 重新投影偵測器，替代路上的 VD 正式標記為 on_route: true
+    5. 產出新路徑專屬的覆蓋色帶 vd_coverage，原主線舊色帶自動消除
     """
     path = req.polyline or []
     if len(path) < 2:
@@ -1280,11 +1311,28 @@ def route_reprofile(req: RouteReprofileRequest, force: bool = False):
         cum.append(cum[-1] + haversine_distance_meters(
             path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]))
 
+    # 1. 自動幾何偵測路口轉彎點 (供後續改道與覆蓋截斷使用)
+    turns = detect_turn_boundaries(path, cum)
+
+    # 2. 精確計算各 leg 的終點里程 (leg_boundaries)
+    if req.stop_coordinates and len(req.stop_coordinates) > 1:
+        calc_legs: List[float] = []
+        for coord in req.stop_coordinates[1:]:
+            _, s = _project_point_to_path(coord[0], coord[1], path, cum)
+            calc_legs.append(round(s, 1))
+        if calc_legs:
+            calc_legs[-1] = cum[-1]
+            leg_bounds = calc_legs
+        else:
+            leg_bounds = req.leg_boundaries if req.leg_boundaries else [cum[-1]]
+    else:
+        leg_bounds = req.leg_boundaries if req.leg_boundaries else [cum[-1]]
+
     profile = {
         "path": path,
         "cum": cum,
-        "turn_boundaries": [],
-        "leg_boundaries": req.leg_boundaries if req.leg_boundaries else [cum[-1]],
+        "turn_boundaries": turns,
+        "leg_boundaries": leg_bounds,
         "road_segments": []
     }
 
@@ -1302,8 +1350,8 @@ def route_reprofile(req: RouteReprofileRequest, force: bool = False):
         "vd_coverage": vd_coverage,
         "route_meta": {
             "cum": cum,
-            "turn_boundaries": [],
-            "leg_boundaries": profile.get("leg_boundaries", [cum[-1]])
+            "turn_boundaries": turns,
+            "leg_boundaries": leg_bounds
         }
     }
 
