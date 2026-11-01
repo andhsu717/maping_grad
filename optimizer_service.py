@@ -1012,8 +1012,33 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
             stats["best_nonfake_saved_min"] = saved_min
         if saved_min <= REROUTE_MIN_SAVED_MIN:
             continue
+
+        # 計算替代道路上的 VD 覆蓋片段（供前端套用時無縫繪製車流）
+        alt_coverage: List[Dict[str, Any]] = []
+        for vd in vds:
+            spd = vd.get("speed")
+            lat = vd.get("lat")
+            lon = vd.get("lon")
+            if lat is None or lon is None:
+                continue
+            off, s = _project_point_to_path(float(lat), float(lon), alt_path, alt_cum)
+            if off <= COVERAGE_THRESHOLD_M:
+                a_cov = max(0.0, s - EXTEND_M)
+                b_cov = min(alt_total_m, s + EXTEND_M)
+                seg = _slice_path(alt_path, alt_cum, a_cov, b_cov)
+                if len(seg) >= 2:
+                    vd_spd = float(spd) if spd is not None and float(spd) > 0 else 0.0
+                    alt_coverage.append({
+                        "vdid": vd.get("vdid", ""),
+                        "s_m": round(s, 1),
+                        "path": seg,
+                        "color": classify_vd_color(vd_spd) if vd_spd > 0 else "GRAY",
+                        "speed": vd_spd
+                    })
+
         alts.append({
             "seg_polyline": alt_path,
+            "coverage": alt_coverage,
             "p1_m": round(p1, 1),
             "p2_m": round(p2, 1),
             "leg_start_m": round(leg_start, 1),

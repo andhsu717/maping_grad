@@ -1359,13 +1359,13 @@
             buildVdPointIndex();
             const vds = [];
             const seen = new Set();
-            (trip.vd_result.coverage || []).forEach(cov => {
-                if (seen.has(cov.vdid)) return;
-                seen.add(cov.vdid);
-                const p = vdPointIndex[cov.vdid];
-                const eff = effectiveVd(cov.vdid);
+            // 包含該縣市的所有偵測器點位，確保替代道路上的 VD 亦能被後端投影覆蓋
+            (trip.vd_result.points || []).forEach(p => {
+                if (seen.has(p.vdid)) return;
+                seen.add(p.vdid);
+                const eff = effectiveVd(p.vdid);
                 if (!p || p.lat == null || p.lon == null) return;
-                vds.push({ vdid: cov.vdid, lat: p.lat, lon: p.lon, speed: eff.speed || 0 });
+                vds.push({ vdid: p.vdid, lat: p.lat, lon: p.lon, speed: eff.speed || 0 });
             });
             const coverage = [];
             (trip.vd_result.coverage || []).forEach(cov => {
@@ -1421,6 +1421,26 @@
             if (!trip.appliedReroutes || sM == null) return false;
             return Object.values(trip.appliedReroutes).some(ap =>
                 ap.leg_index === legIndex && sM >= ap.p1_m && sM <= ap.p2_m);
+        }
+
+        // 動態合成當前有效的車流覆蓋段（濾除已繞開之舊路段覆蓋，注入改道新路段覆蓋）
+        function getEffectiveTripCoverage(trip) {
+            if (!trip || !trip.vd_result) return [];
+            const out = [];
+            // 1. 原始路徑覆蓋段：濾除落在已套用改道區間 [p1_m, p2_m] 內的路段（避免空路殘留）
+            (trip.vd_result.coverage || []).forEach(cov => {
+                if (appliedEventCovers(trip, cov.leg_index, cov.s_m)) return;
+                out.push(cov);
+            });
+            // 2. 注入已套用改道隨附的覆蓋段（替代道路上的偵測器即時上色）
+            Object.values(trip.appliedReroutes || {}).forEach(ap => {
+                if (ap.alt && ap.alt.coverage && ap.alt.coverage.length) {
+                    ap.alt.coverage.forEach(acov => {
+                        out.push(acov);
+                    });
+                }
+            });
+            return out;
         }
 
         function applyReroute(tripKey, eventId, altIndex) {
@@ -1557,9 +1577,10 @@
                         });
                     }
 
-                    // VD 覆蓋段（偵測器標記改由全域 vdLayerGroup 彙總繪製）
+                    // VD 覆蓋段（動態過濾已改道區間，並納入改道新路段覆蓋）
                     if (trip.vd_result) {
-                        (trip.vd_result.coverage || []).forEach(cov => {
+                        const activeCoverage = getEffectiveTripCoverage(trip);
+                        activeCoverage.forEach(cov => {
                             const eff = effectiveVd(cov.vdid);
                             const baseColor = VD_COLORS[eff.color] || VD_COLORS.GRAY;
                             L.polyline(cov.path, {
