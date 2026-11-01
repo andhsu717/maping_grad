@@ -838,11 +838,63 @@ def _capped_route_duration_s(route: Dict[str, Any]) -> float:
     return total
 
 
+def get_via_point(p1: List[float], p2: List[float],
+                  offset_meters: float = 600.0, side: str = "right") -> List[float]:
+    """
+    p1: [lat1, lon1], p2: [lat2, lon2]
+    向行進方向左側或右側垂直偏移 offset_meters，並用 OSRM /nearest 吸附到最近道路。
+    回傳 [via_lat, via_lon]
+    """
+    lat1, lon1 = p1[0], p1[1]
+    lat2, lon2 = p2[0], p2[1]
+    mid_lat = (lat1 + lat2) / 2.0
+    mid_lon = (lon1 + lon2) / 2.0
+
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+
+    # 經緯度尺度換算 (台灣緯度約 24~25 度：1度緯度約 111,000m，1度經度約 102,000m)
+    scale_y = 111000.0
+    scale_x = 102000.0
+
+    dx_m = dlon * scale_x
+    dy_m = dlat * scale_y
+    length_m = math.hypot(dx_m, dy_m)
+    if length_m < 1.0:
+        return [lat1, lon1]
+
+    ux = dx_m / length_m
+    uy = dy_m / length_m
+
+    if side == "right":
+        perp_x, perp_y = uy, -ux
+    else:
+        perp_x, perp_y = -uy, ux
+
+    offset_lon = mid_lon + (perp_x * offset_meters) / scale_x
+    offset_lat = mid_lat + (perp_y * offset_meters) / scale_y
+
+    # 吸附至最近的道路節點 (OSRM nearest)
+    try:
+        url = f"{OSRM_BASE_URL}/nearest/v1/driving/{offset_lon:.6f},{offset_lat:.6f}"
+        resp = requests.get(url, headers=HEADERS, timeout=4)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("code") == "Ok" and data.get("waypoints"):
+                loc = data["waypoints"][0]["location"]  # [lon, lat]
+                return [loc[1], loc[0]]
+    except Exception:
+        pass
+
+    return [offset_lat, offset_lon]
+
+
 def _reroute_candidates(path: List[List[float]], cum: List[float],
                         vds: List[Dict[str, Any]], merged_main: List[List[float]],
                         p1: float, p2: float, leg_start: float, leg_end: float,
                         leg_nom: float, main_total_s: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """查 OSRM P1→P2，只回傳節省 > REROUTE_MIN_SAVED_MIN 的候選與統計。"""
+    """以主動導航策略（exclude=motorway 與 P_via 側推）索取改道候選，
+    經速限重算、TDX 檢驗與全路徑總耗時比較，只回傳節省 > REROUTE_MIN_SAVED_MIN 的候選。"""
     stats: Dict[str, Any] = {
         "osrm_routes": 0,
         "nonfake_alts": 0,
@@ -850,29 +902,74 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
     }
     pt1 = _path_point_at(path, cum, p1)
     pt2 = _path_point_at(path, cum, p2)
+
+    raw_routes: List[Dict[str, Any]] = []
+
+    # 策略 1：嘗試 exclude=motorway（高架/國道壅塞時自動引導下交流道走平面）
     try:
-        url = (f"{OSRM_BASE_URL}/route/v1/driving/"
-               f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-               f"?alternatives={REROUTE_ALT_MAX}&overview=full&geometries=geojson&steps=true")
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code == 200:
-            routes = resp.json().get("routes", [])
-        else:
-            routes = []
-            print(f"[reroute] OSRM {resp.status_code}: {resp.text[:200]}")
+        url_ex = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                  f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                  f"?overview=full&geometries=geojson&steps=true&exclude=motorway")
+        resp_ex = requests.get(url_ex, headers=HEADERS, timeout=6)
+        if resp_ex.status_code == 200:
+            routes_ex = resp_ex.json().get("routes", [])
+            if routes_ex:
+                raw_routes.append(routes_ex[0])
     except Exception:
-        routes = []
-    if not routes:
+        pass
+
+    # 策略 2：市區側向避開點 P_via（向右與向左側推 600m，強制繞行）
+    for side in ("right", "left"):
+        via_pt = get_via_point(pt1, pt2, offset_meters=600.0, side=side)
+        d_v1 = haversine_distance_meters(pt1[0], pt1[1], via_pt[0], via_pt[1])
+        d_v2 = haversine_distance_meters(pt2[0], pt2[1], via_pt[0], via_pt[1])
+        if d_v1 < 30.0 or d_v2 < 30.0:
+            continue
+        try:
+            url_via = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                       f"{pt1[1]:.6f},{pt1[0]:.6f};{via_pt[1]:.6f},{via_pt[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                       f"?overview=full&geometries=geojson&steps=true")
+            resp_via = requests.get(url_via, headers=HEADERS, timeout=6)
+            if resp_via.status_code == 200:
+                routes_via = resp_via.json().get("routes", [])
+                if routes_via:
+                    raw_routes.append(routes_via[0])
+        except Exception:
+            pass
+
+    # 若主動導航未產出，以原本 alternatives=2 作為備用兜底
+    if not raw_routes:
+        try:
+            url_alt = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                       f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                       f"?alternatives=2&overview=full&geometries=geojson&steps=true")
+            resp_alt = requests.get(url_alt, headers=HEADERS, timeout=6)
+            if resp_alt.status_code == 200:
+                raw_routes = resp_alt.json().get("routes", [])
+        except Exception:
+            pass
+
+    if not raw_routes:
         return [], stats
-    considered = routes[:REROUTE_ALT_MAX]
-    stats["osrm_routes"] = len(considered)
+
+    stats["osrm_routes"] = len(raw_routes)
     main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
     base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
     alts: List[Dict[str, Any]] = []
-    for rt in considered:
+
+    seen_geoms = set()
+    for rt in raw_routes:
         alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
         if len(alt_path) < 2:
             continue
+
+        # 幾何重複過濾
+        mid_idx = len(alt_path) // 2
+        geom_key = (len(alt_path), round(alt_path[mid_idx][0], 4), round(alt_path[mid_idx][1], 4))
+        if geom_key in seen_geoms:
+            continue
+        seen_geoms.add(geom_key)
+
         alt_cum = [0.0]
         for i in range(1, len(alt_path)):
             alt_cum.append(alt_cum[-1] + haversine_distance_meters(
@@ -880,17 +977,20 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         alt_total_m = alt_cum[-1]
         if alt_total_m <= 0:
             continue
+
         # 幾何過濾：與主線幾乎重疊（假備選）才丟棄
         max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, alt_cum, path, cum)
         if max_off <= REROUTE_MIN_DEVIATION_M:
             continue
         stats["nonfake_alts"] += 1
+
         alt_osrm_s = _capped_route_duration_s(rt) or float(rt.get("duration") or 0.0)
         alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
         merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
         alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
         cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
         saved_min = (main_total_s - cand_total_s) / 60.0
+
         best_nonfake = stats["best_nonfake_saved_min"]
         if best_nonfake is None or saved_min > best_nonfake:
             stats["best_nonfake_saved_min"] = saved_min
@@ -1052,13 +1152,13 @@ def route_alternatives(req: RouteAlternativesRequest):
                 ref = turns_after[-1] if turns_after else b
                 return ref + REROUTE_SCOPE_STEP_M * (k - len(turns_after) + 1)
 
-            # 3) 動態範圍擴展：評估所有 scope，取全局最佳省時
+            # 3) 主動候選搜尋：取最近轉彎路口 (最多搜尋 2 階，有結果即終止)
             all_alts: List[Dict[str, Any]] = []
             seen = set()
             total_routes = 0
             total_nonfake = 0
             best_nonfake: Optional[float] = None
-            for k in range(REROUTE_SCOPE_MAX + 1):
+            for k in range(min(2, REROUTE_SCOPE_MAX + 1)):
                 p1 = max(evt_start, min(_cand_p1(k), a))
                 p2 = min(evt_end, max(_cand_p2(k), b))
                 if p2 - p1 < REROUTE_MIN_WINDOW_M:
@@ -1079,6 +1179,8 @@ def route_alternatives(req: RouteAlternativesRequest):
                         continue
                     seen.add(key)
                     all_alts.append(alt)
+                if all_alts:
+                    break
             if all_alts:
                 all_alts.sort(key=lambda a: (-a["saved_min"], a["eta_min"]))
                 best_alt = all_alts[0]
