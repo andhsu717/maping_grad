@@ -735,7 +735,7 @@ def traffic_live(counties: str = "", force: bool = False):
 # ================= 改道備選路徑 (Phase 3) =================
 REROUTE_MIN_WINDOW_M = 100.0   # P1→P2 區間過短則不提改道
 REROUTE_ALT_MAX = 3            # 每條 leg 最多候選路徑數（自建 OSRM 預設上限 3，超過會回 400）
-REROUTE_MIN_SAVED_MIN = -999.0  # 不因節省不足而丟棄（含比原路慢者，供人工比較）
+REROUTE_MIN_SAVED_MIN = 0.5   # 只保留節省大於 0.5 分鐘的改道備選
 REROUTE_MIN_DEVIATION_M = 5.0  # 備選與主線偏離小於此值視為假備選丟棄
 REROUTE_SCOPE_MAX = 3          # 找不到候選時向外擴展的最大階數
 REROUTE_SCOPE_STEP_M = 200.0   # 轉彎稀疏時的固定擴展步進 (公尺)
@@ -841,8 +841,13 @@ def _capped_route_duration_s(route: Dict[str, Any]) -> float:
 def _reroute_candidates(path: List[List[float]], cum: List[float],
                         vds: List[Dict[str, Any]], merged_main: List[List[float]],
                         p1: float, p2: float, leg_start: float, leg_end: float,
-                        leg_nom: float, main_total_s: float) -> List[Dict[str, Any]]:
-    """查 OSRM P1→P2 並過濾候選（假備選、無省時），回傳可用備選清單。"""
+                        leg_nom: float, main_total_s: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """查 OSRM P1→P2，只回傳節省 > REROUTE_MIN_SAVED_MIN 的候選與統計。"""
+    stats: Dict[str, Any] = {
+        "osrm_routes": 0,
+        "nonfake_alts": 0,
+        "best_nonfake_saved_min": None,
+    }
     pt1 = _path_point_at(path, cum, p1)
     pt2 = _path_point_at(path, cum, p2)
     try:
@@ -858,11 +863,13 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
     except Exception:
         routes = []
     if not routes:
-        return []
+        return [], stats
+    considered = routes[:REROUTE_ALT_MAX]
+    stats["osrm_routes"] = len(considered)
     main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
     base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
     alts: List[Dict[str, Any]] = []
-    for rt in routes[:REROUTE_ALT_MAX]:
+    for rt in considered:
         alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
         if len(alt_path) < 2:
             continue
@@ -877,12 +884,16 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         max_off, exit_at, rejoin_at = _max_deviation_m(alt_path, alt_cum, path, cum)
         if max_off <= REROUTE_MIN_DEVIATION_M:
             continue
+        stats["nonfake_alts"] += 1
         alt_osrm_s = _capped_route_duration_s(rt) or float(rt.get("duration") or 0.0)
         alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
         merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
         alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
         cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
         saved_min = (main_total_s - cand_total_s) / 60.0
+        best_nonfake = stats["best_nonfake_saved_min"]
+        if best_nonfake is None or saved_min > best_nonfake:
+            stats["best_nonfake_saved_min"] = saved_min
         if saved_min <= REROUTE_MIN_SAVED_MIN:
             continue
         alts.append({
@@ -900,7 +911,8 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
             "exit_at": exit_at,
             "rejoin_at": rejoin_at,
         })
-    return alts
+    alts.sort(key=lambda a: (-a["saved_min"], a["eta_min"]))
+    return alts, stats
 
 
 class RouteAltVd(BaseModel):
@@ -931,7 +943,7 @@ class RouteAlternativesRequest(BaseModel):
 @app.post("/api/route/alternatives")
 def route_alternatives(req: RouteAlternativesRequest):
     """將每條 leg 的壅塞依間隔分群成多個事件，各別推算改道點 (P1)/回歸點 (P2)，
-    回全量候選與狀態 (CAN_REROUTE/CANNOT_REROUTE)。"""
+    只回傳節省 > 0.5 分鐘的候選與狀態 (CAN_REROUTE/CANNOT_REROUTE)。"""
     path = req.polyline or []
     if len(path) < 2:
         return {"status": "success", "legs": []}
@@ -1040,28 +1052,58 @@ def route_alternatives(req: RouteAlternativesRequest):
                 ref = turns_after[-1] if turns_after else b
                 return ref + REROUTE_SCOPE_STEP_M * (k - len(turns_after) + 1)
 
-            # 3) 動態範圍擴展：取最小 k（最近範圍）且有有效候選者
-            found = False
+            # 3) 動態範圍擴展：評估所有 scope，取全局最佳省時
+            all_alts: List[Dict[str, Any]] = []
+            seen = set()
+            total_routes = 0
+            total_nonfake = 0
+            best_nonfake: Optional[float] = None
             for k in range(REROUTE_SCOPE_MAX + 1):
                 p1 = max(evt_start, min(_cand_p1(k), a))
                 p2 = min(evt_end, max(_cand_p2(k), b))
                 if p2 - p1 < REROUTE_MIN_WINDOW_M:
                     continue
-                alts = _reroute_candidates(path, cum, vds, merged_main, p1, p2,
-                                           leg_start, leg_end, leg_nom, main_total_s)
-                if alts:
-                    out_legs.append({
-                        **base,
-                        "state": "CAN_REROUTE",
-                        "reason": None,
-                        "scope": k,
-                        "current_eta_min": round(main_total_s / 60.0, 1),
-                        "alternatives": alts,
-                    })
-                    found = True
-                    break
-            if not found:
-                out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "NO_ALTERNATIVE"})
+                alts, stats = _reroute_candidates(path, cum, vds, merged_main, p1, p2,
+                                                  leg_start, leg_end, leg_nom, main_total_s)
+                total_routes += int(stats.get("osrm_routes") or 0)
+                total_nonfake += int(stats.get("nonfake_alts") or 0)
+                stat_best = stats.get("best_nonfake_saved_min")
+                if isinstance(stat_best, (int, float)):
+                    best_nonfake = stat_best if best_nonfake is None else max(best_nonfake, stat_best)
+                for alt in alts:
+                    alt["scope"] = k
+                    key = (alt["p1_m"], alt["p2_m"],
+                           round(float(alt["distance_km"]), 2),
+                           round(float(alt["saved_min"]), 1))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    all_alts.append(alt)
+            if all_alts:
+                all_alts.sort(key=lambda a: (-a["saved_min"], a["eta_min"]))
+                best_alt = all_alts[0]
+                out_legs.append({
+                    **base,
+                    "state": "CAN_REROUTE",
+                    "reason": None,
+                    "scope": best_alt.get("scope", 0),
+                    "current_eta_min": round(main_total_s / 60.0, 1),
+                    "best_saved_min": best_alt["saved_min"],
+                    "alternatives": all_alts,
+                })
+            else:
+                if total_routes == 0:
+                    reason = "NO_ALTERNATIVE"
+                elif total_nonfake == 0:
+                    reason = "FAKE_ALTERNATIVE"
+                else:
+                    reason = "NO_TIME_SAVED"
+                out_legs.append({
+                    **base,
+                    "state": "CANNOT_REROUTE",
+                    "reason": reason,
+                    "best_nonfake_saved_min": round(best_nonfake, 1) if best_nonfake is not None else None,
+                })
 
     return {"status": "success", "legs": out_legs}
 

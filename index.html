@@ -644,7 +644,7 @@
         // 官方壅塞等級 1(A)~5(E) 代表速度（無門檻時使用，km/h）
         const VD_LEVEL_FALLBACK_SPEED = { 1: 45, 2: 37, 3: 30, 4: 23, 5: 10 };
         const VD_LEVEL_LABEL = { 1: 'A 順暢', 2: 'B 車多', 3: 'C 壅塞', 4: 'D 嚴重壅塞', 5: 'E 極度壅塞' };
-        const REROUTE_REASON_LABEL = { WINDOW_TOO_SHORT: '路徑過短', NO_ALTERNATIVE: '無替代路徑' };
+        const REROUTE_REASON_LABEL = { WINDOW_TOO_SHORT: '路徑過短', NO_ALTERNATIVE: '無替代路徑', NO_TIME_SAVED: '無節省時間（未達 0.5 分鐘）', FAKE_ALTERNATIVE: '無有效替代路徑' };
         const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
 
         let depotStore = []; 
@@ -1395,10 +1395,13 @@
                     return;
                 }
                 const data = await resp.json();
-                trip.rerouteOptions = (data.legs || []).filter(x => !(trip.appliedReroutes && trip.appliedReroutes[x.event_id]));
-                const withAlts = (trip.rerouteOptions || []).filter(x => x.alternatives && x.alternatives.length).length;
-                const noAlts = (trip.rerouteOptions || []).filter(x => !x.alternatives || !x.alternatives.length).length;
-                console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議、${noAlts} 段無法改道`);
+                trip.rerouteOptions = (data.legs || []).filter(x =>
+                    x.state === 'CAN_REROUTE' &&
+                    x.alternatives && x.alternatives.some(a => a.saved_min >= 0.5) &&
+                    !(trip.appliedReroutes && trip.appliedReroutes[x.event_id])
+                );
+                const withAlts = (trip.rerouteOptions || []).length;
+                console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議省時改道`);
                 renderAllMapLayers();
                 renderTimelineView();
             } catch (err) {
@@ -1500,18 +1503,19 @@
                             .addTo(layerGroup);
                     }
 
-                    // 改道備選路徑（虛線）與 ETA 標示
+                    // 改道備選路徑（虛線）與 ETA 標示（僅顯示節省 0.5 分鐘以上，且僅顯示整條路徑節省時間）
                     (trip.rerouteOptions || []).forEach(item => {
                         (item.alternatives || []).forEach((alt, ai) => {
                             if (!alt.seg_polyline || alt.seg_polyline.length < 2) return;
+                            if (alt.saved_min < 0.5) return;
                             L.polyline(alt.seg_polyline, {
                                 color: '#111111', weight: 5, opacity: 0.65, dashArray: '10,8', className: 'reroute-flow'
                             }).addTo(layerGroup)
-                                .bindTooltip(`Leg ${item.leg_index + 1} 備選${ai + 1}：壅塞段原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選 ${alt.alt_p1p2_min} 分 ｜ 整趟 ${item.current_eta_min} → ${alt.eta_min} 分`, { sticky: true });
+                                .bindTooltip(`Leg ${item.leg_index + 1} 備選${ai + 1}：整趟省 ${alt.saved_min.toFixed(1)} 分（${item.current_eta_min} → ${alt.eta_min} 分）`, { sticky: true });
                             const midPt = alt.seg_polyline[Math.floor(alt.seg_polyline.length / 2)];
                             if (midPt) {
                                 L.marker(midPt, {
-                                    icon: L.divIcon({ className: '', html: `<div class="alt-eta-badge"><span class="alt-eta-dot" style="background:${trip.color};"></span>${alt.main_p1p2_min}分 → ${alt.alt_p1p2_min}分</div>`, iconSize: [120, 18], iconAnchor: [60, 9] }),
+                                    icon: L.divIcon({ className: '', html: `<div class="alt-eta-badge"><span class="alt-eta-dot" style="background:${trip.color};"></span>省 ${alt.saved_min.toFixed(1)} 分</div>`, iconSize: [90, 18], iconAnchor: [45, 9] }),
                                     interactive: false
                                 }).addTo(layerGroup);
                             }
@@ -1789,11 +1793,10 @@
                         <div class="timeline-arrow-head"></div>
                     `;
 
-                    // 改道比較面板（同一 leg 可有多個事件）
+                    // 改道比較面板（僅顯示有節省 0.5 分鐘以上的建議，不顯示無法改道）
                     const legItems = (trip.rerouteOptions || []).filter(x => x.leg_index === index);
                     const legApplied = Object.values(trip.appliedReroutes || {}).filter(ap => ap.leg_index === index);
-                    const suggestItems = legItems.filter(x => x.alternatives && x.alternatives.length);
-                    const noItems = legItems.filter(x => x.state === 'CANNOT_REROUTE');
+                    const suggestItems = legItems.filter(x => x.alternatives && x.alternatives.some(a => a.saved_min >= 0.5));
                     const bestItem = suggestItems.length
                         ? suggestItems.reduce((a, b) => {
                             const ea = Math.min(...a.alternatives.map(t => t.eta_min || 0));
@@ -1803,7 +1806,8 @@
                         : null;
                     if (bestItem) {
                         // 有建議路徑：原箭頭資訊不變但稍左移，右側併排一條螢光黃改道箭頭
-                        const bestAlt = bestItem.alternatives.reduce((a, b) => ((a.eta_min || 0) <= (b.eta_min || 0) ? a : b));
+                        const validAlts = bestItem.alternatives.filter(a => a.saved_min >= 0.5);
+                        const bestAlt = (validAlts.length ? validAlts : bestItem.alternatives).reduce((a, b) => ((a.eta_min || 0) <= (b.eta_min || 0) ? a : b));
                         const duo = document.createElement('div');
                         duo.className = 'timeline-arrow-duo';
                         arrowEl.classList.add('shifted');
@@ -1813,7 +1817,7 @@
                         rrArrow.innerHTML = `
                             <div class="timeline-arrow-line"></div>
                             <div class="timeline-arrow-badge">
-                                <span>壅塞 ${bestAlt.main_p1p2_min} 分 → 建議 ${bestAlt.alt_p1p2_min} 分</span>
+                                <span>建議改道：省 ${bestAlt.saved_min.toFixed(1)} 分</span>
                             </div>
                             <div class="timeline-arrow-head"></div>
                         `;
@@ -1824,23 +1828,17 @@
                     }
 
                     suggestItems.forEach(item => {
+                        const validAlts = item.alternatives.filter(alt => alt.saved_min >= 0.5);
+                        if (!validAlts.length) return;
                         const rrPanel = document.createElement('div');
                         rrPanel.className = 'reroute-panel';
-                        let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}，壅塞 ${item.a_m}–${item.b_m} m）</div>`;
-                        item.alternatives.forEach((alt, ai) => {
-                            const savedTxt = (alt.saved_min < 0) ? `多 ${Math.abs(alt.saved_min).toFixed(1)} 分` : `省 ${alt.saved_min.toFixed(1)} 分`;
-                            rrHtml += `<div class="reroute-row"><span>壅塞原路 ${alt.main_p1p2_min} 分（暢通 ${alt.base_p1p2_min} 分）｜ 備選${ai + 1}: ${alt.alt_p1p2_min} 分（${savedTxt}）｜ 整趟 ${item.current_eta_min} → ${alt.eta_min} 分</span>`
+                        let rrHtml = `<div class="reroute-title">建議改道（Leg ${index + 1}）</div>`;
+                        validAlts.forEach((alt, ai) => {
+                            rrHtml += `<div class="reroute-row"><span>備選 ${ai + 1}：省 ${alt.saved_min.toFixed(1)} 分（整趟 ${item.current_eta_min} → ${alt.eta_min} 分）</span>`
                                 + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}">套用</button></div>`;
                         });
                         rrPanel.innerHTML = rrHtml;
                         flowContainer.appendChild(rrPanel);
-                    });
-                    noItems.forEach(item => {
-                        const noPanel = document.createElement('div');
-                        noPanel.className = 'reroute-panel';
-                        const reasonLabel = REROUTE_REASON_LABEL[item.reason] || item.reason || '';
-                        noPanel.innerHTML = `<div class="reroute-title">無法改道（Leg ${index + 1}，壅塞 ${item.a_m}–${item.b_m} m）</div><div>${reasonLabel}</div>`;
-                        flowContainer.appendChild(noPanel);
                     });
                     legApplied.forEach(ap => {
                         const donePanel = document.createElement('div');
