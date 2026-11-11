@@ -433,12 +433,19 @@ def fetch_osrm_table(coords: List[List[float]]) -> List[List[float]]:
         pass
     return compute_haversine_matrix(coords)
 
+UNREACHABLE_COST_M = 1e9  # OSRM 回傳 null（兩點無法開車到達）時的懲罰距離
+
+
 def open_tsp_2opt(node_indices: List[int], dist_matrix: List[List[float]], start_idx: int = 0) -> List[int]:
+    def dist(i: int, j: int) -> float:
+        d = dist_matrix[i][j]
+        return float(d) if d is not None else UNREACHABLE_COST_M
+
     unvisited = [n for n in node_indices if n != start_idx]
     route = [start_idx]
     curr = start_idx
     while unvisited:
-        next_node = min(unvisited, key=lambda n: dist_matrix[curr][n] if dist_matrix[curr][n] is not None else float('inf'))
+        next_node = min(unvisited, key=lambda n: dist(curr, n))
         route.append(next_node)
         unvisited.remove(next_node)
         curr = next_node
@@ -446,7 +453,8 @@ def open_tsp_2opt(node_indices: List[int], dist_matrix: List[List[float]], start
     improved = True
     n_nodes = len(route)
     def route_cost(r):
-        return sum(dist_matrix[r[k]][r[k+1]] or 0 for k in range(len(r) - 1))
+        # 無法到達的兩點以懲罰距離計，避免 2-opt 把它們誤當成 0 距離而排在一起
+        return sum(dist(r[k], r[k + 1]) for k in range(len(r) - 1))
 
     best_cost = route_cost(route)
     iteration = 0
