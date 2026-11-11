@@ -1409,62 +1409,45 @@ def _are_routes_duplicate(alt_a: Dict[str, Any], alt_b: Dict[str, Any]) -> bool:
 
 
 def _deduplicate_leg_reroutes(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """在同一個 Leg 內，比對道路與時間節省，合併減少重複的改道事件。"""
+    """同一個 Leg 內以「路線」為單位去重，單點與整合事件並存、提供多樣選擇。
+
+    - 跨事件比對所有候選路線（不只第一名）：同一條路只出現一次，
+      歸給涵蓋最多壅塞處的事件（整合優先，其次涵蓋範圍較長、省時較多）。
+    - 事件各自保留與其他事件不同的路線，重新依省時排序並套用每事件上限；
+      路線全被較大事件涵蓋的單點事件不再單獨顯示（同一條路已在整合事件中）。
+    """
     can_events = [e for e in events if e.get("state") == "CAN_REROUTE"]
     other_events = [e for e in events if e.get("state") != "CAN_REROUTE"]
-    if len(can_events) <= 1:
+    if not can_events:
         return events
 
-    merged_can: List[Dict[str, Any]] = []
-    for cur in can_events:
-        cur_best = (cur.get("alternatives") or [{}])[0]
-        duplicate_target = None
-        for existing in merged_can:
-            exist_best = (existing.get("alternatives") or [{}])[0]
-            if _are_routes_duplicate(cur_best, exist_best):
-                duplicate_target = existing
-                break
+    def _best_saved(ev: Dict[str, Any]) -> float:
+        alts = ev.get("alternatives") or []
+        return max((float(a.get("saved_min") or 0.0) for a in alts), default=0.0)
 
-        if duplicate_target is None:
-            merged_can.append(cur)
-        else:
-            # 發生重複：優先保留 COMBINED 事件；若同類型則保留省時更長或涵蓋範圍更廣者
-            target_best = (duplicate_target.get("alternatives") or [{}])[0]
-            cur_is_comb = cur.get("event_type") == "COMBINED"
-            tgt_is_comb = duplicate_target.get("event_type") == "COMBINED"
-
-            should_replace = False
-            if cur_is_comb and not tgt_is_comb:
-                should_replace = True
-            elif cur_is_comb == tgt_is_comb:
-                cur_save = cur_best.get("realtime_saved_min") if cur_best.get("realtime_saved_min") is not None else cur_best.get("saved_min", 0.0)
-                tgt_save = target_best.get("realtime_saved_min") if target_best.get("realtime_saved_min") is not None else target_best.get("saved_min", 0.0)
-                if cur_save > tgt_save:
-                    should_replace = True
-
-            chosen = cur if should_replace else duplicate_target
-            abandoned = duplicate_target if should_replace else cur
-
-            # 把被合併事件中走「不同道路」的額外備選方案收納進來
-            for extra_alt in abandoned.get("alternatives", []):
-                if not any(_are_routes_duplicate(extra_alt, exist_alt) for exist_alt in chosen.get("alternatives", [])):
-                    chosen["alternatives"].append(extra_alt)
-
-            if should_replace:
-                merged_can.remove(duplicate_target)
-                merged_can.append(chosen)
-
-    # 針對留下來的各事件內部，也過濾掉實質相同的備選方案
-    for ev in merged_can:
-        clean_alts: List[Dict[str, Any]] = []
-        for alt in ev.get("alternatives", []):
-            if not any(_are_routes_duplicate(alt, ca) for ca in clean_alts):
-                clean_alts.append(alt)
-        ev["alternatives"] = clean_alts
-        if clean_alts:
-            ev["best_saved_min"] = clean_alts[0].get("saved_min")
-
-    return merged_can + other_events
+    can_events.sort(key=lambda e: (-int(e.get("covers") or 1),
+                                   -(float(e.get("b_m") or 0.0) - float(e.get("a_m") or 0.0)),
+                                   -_best_saved(e)))
+    kept_routes: List[Dict[str, Any]] = []
+    out: List[Dict[str, Any]] = []
+    for ev in can_events:
+        uniq: List[Dict[str, Any]] = []
+        for alt in sorted(ev.get("alternatives") or [], key=lambda a: (-a["saved_min"], a["eta_min"])):
+            if any(_are_routes_duplicate(alt, k) for k in kept_routes):
+                continue
+            if any(_are_routes_duplicate(alt, u) for u in uniq):
+                continue
+            uniq.append(alt)
+        uniq = uniq[:REROUTE_ALT_MAX]
+        if not uniq:
+            continue
+        kept_routes.extend(uniq)
+        ev["alternatives"] = uniq
+        ev["best_saved_min"] = uniq[0].get("saved_min")
+        out.append(ev)
+    # 依沿線位置排序，時間軸與地圖由前往後呈現
+    out.sort(key=lambda e: (float(e.get("a_m") or 0.0), e.get("event_type") == "COMBINED"))
+    return out + other_events
 
 
 @app.post("/api/route/alternatives")
@@ -1516,7 +1499,7 @@ def route_alternatives(req: RouteAlternativesRequest):
         ivs.sort(key=lambda x: x[0])
         # 1. 單點事件：每支壅塞偵測器自己的覆蓋段（覆蓋段已於中點平分，彼此不重疊）
         singles: List[Dict[str, Any]] = [
-            {"a": a, "b": b, "worst": color, "event_type": "SINGLE"} for a, b, color in ivs
+            {"a": a, "b": b, "worst": color, "event_type": "SINGLE", "covers": 1} for a, b, color in ivs
         ]
 
         slots: List[Dict[str, Any]] = list(singles)
@@ -1544,6 +1527,7 @@ def route_alternatives(req: RouteAlternativesRequest):
                     "b": c_b,
                     "worst": worst_c,
                     "event_type": "COMBINED",
+                    "covers": len(grp),
                     "tag": f"整合連續壅塞（涵蓋 {len(grp)} 處塞車）"
                 })
 
@@ -1589,6 +1573,7 @@ def route_alternatives(req: RouteAlternativesRequest):
                 "leg_index": li,
                 "event_id": f"{li}:{ev_code}:{round(a, 1)}",
                 "event_type": etype,
+                "covers": int(slot.get("covers") or 1),
                 "tag": etag,
                 "a_m": round(a, 1),
                 "b_m": round(b, 1),

@@ -494,6 +494,9 @@
         /* 改道備選路徑：黑色透明動態虛線 */
         @keyframes reroute-march { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -36; } }
         .reroute-flow { stroke-dasharray: 10 8; animation: reroute-march 0.9s linear infinite; }
+        /* 整合改道：較長的虛線，與單點改道區分 */
+        @keyframes reroute-march-comb { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -60; } }
+        .reroute-flow-comb { stroke-dasharray: 22 8; animation: reroute-march-comb 1.2s linear infinite; }
         /* 改道虛線方向箭頭（依行進方向旋轉，間距隨縮放調整） */
         .reroute-arrow-icon { pointer-events: none; }
         .reroute-arrow { width: 14px; height: 14px; line-height: 0; transform-origin: 50% 50%; }
@@ -768,8 +771,13 @@
             NO_ALTERNATIVE: '無有效替代道路（周邊無合適繞行幹道）',
             NO_TIME_SAVED: '繞行未達省時門檻（替代路段耗時更長）',
             FAKE_ALTERNATIVE: '無有效避開路線（替代路與原路重疊）',
-            REVERTED_ORIGINAL: '已避開原定路線（維持目前改道）'
+            REVERTED_ORIGINAL: '候選會繞回已避開的原路（維持目前改道）'
         };
+
+        // 改道類型標示：單點／整合 N 處
+        function rerouteTypeLabel(item) {
+            return item && item.event_type === 'COMBINED' ? `整合・避開 ${item.covers || 2} 處` : '單點';
+        }
         const VD_COLOR_SEVERITY = { GRAY: 0, GREEN: 1, ORANGE: 2, RED: 3 };
         const BEARING_LABEL = { N: '北向', NE: '東北向', E: '東向', SE: '東南向', S: '南向', SW: '西南向', W: '西向', NW: '西北向' };
 
@@ -1869,13 +1877,16 @@
 
                     // 改道備選路徑（虛線）與 ETA 標示（僅顯示節省 0.5 分鐘以上，且僅顯示整條路徑節省時間）
                     (trip.rerouteOptions || []).forEach(item => {
+                        const typeLabel = rerouteTypeLabel(item);
                         (item.alternatives || []).forEach((alt, ai) => {
                             if (!alt.seg_polyline || alt.seg_polyline.length < 2) return;
                             if (alt.saved_min < 0.5) return;
+                            const isComb = item.event_type === 'COMBINED';
                             L.polyline(alt.seg_polyline, {
-                                color: '#111111', weight: 5, opacity: 0.65, dashArray: '10,8', className: 'reroute-flow'
+                                color: '#111111', weight: 5, opacity: 0.65, dashArray: isComb ? '22,8' : '10,8',
+                                className: isComb ? 'reroute-flow-comb' : 'reroute-flow'
                             }).addTo(layerGroup)
-                                .bindTooltip(`Leg ${item.leg_index + 1} 備選${ai + 1}：整趟省 ${alt.saved_min.toFixed(1)} 分（${item.current_eta_min} → ${alt.eta_min} 分）`, { sticky: true });
+                                .bindTooltip(`Leg ${item.leg_index + 1}｜${typeLabel} 備選${ai + 1}：整趟省 ${alt.saved_min.toFixed(1)} 分（${item.current_eta_min} → ${alt.eta_min} 分）`, { sticky: true });
                             const midPt = alt.seg_polyline[Math.floor(alt.seg_polyline.length / 2)];
                             if (midPt) {
                                 const colorHexMap = {
@@ -1898,6 +1909,7 @@
                                                                 const badgeHtml = `<div class="alt-eta-badge" onclick="toggleAltEtaBadge(this, event)" title="點擊展開/收起詳情">
                                     <div class="alt-eta-collapsed-dot" style="background:${trip.color};"></div>
                                     <div class="alt-eta-expanded-body">
+                                        <div class="alt-eta-row" style="color:#7c3aed; font-weight:700;"><span>${typeLabel}</span></div>
                                         <div class="alt-eta-row">
                                             <span class="alt-eta-dot" style="background:${trip.color};"></span>
                                             <span>省 ${alt.saved_min.toFixed(1)}分 (預估)</span>
@@ -2242,10 +2254,7 @@
                         duo.appendChild(arrowEl);
                         const rrArrow = document.createElement('div');
                         rrArrow.className = 'timeline-arrow-wrap reroute';
-                        const isComb = bestItem.event_type === 'COMBINED';
-                        const badgeLabel = legApplied.length
-                            ? (isComb ? `建議接續整合改道：省 ${bestAlt.saved_min.toFixed(1)} 分` : `建議接續改道：省 ${bestAlt.saved_min.toFixed(1)} 分`)
-                            : (isComb ? `建議整合改道：省 ${bestAlt.saved_min.toFixed(1)} 分` : `建議改道：省 ${bestAlt.saved_min.toFixed(1)} 分`);
+                        const badgeLabel = `${legApplied.length ? '建議接續改道' : '建議改道'}（${rerouteTypeLabel(bestItem)}）：省 ${bestAlt.saved_min.toFixed(1)} 分`;
                         rrArrow.innerHTML = `
                             <div class="timeline-arrow-line"></div>
                             <div class="timeline-arrow-badge">
@@ -2288,10 +2297,7 @@
                         if (!validAlts.length) return;
                         const rrPanel = document.createElement('div');
                         rrPanel.className = 'reroute-panel';
-                        const isComb = item.event_type === 'COMBINED';
-                        const titleText = legApplied.length
-                            ? (isComb ? `建議接續整合改道（Leg ${index + 1}，避開連續壅塞）` : `建議接續改道（Leg ${index + 1}）`)
-                            : (isComb ? `建議整合改道（Leg ${index + 1}，避開連續壅塞）` : `建議改道（Leg ${index + 1}）`);
+                        const titleText = `${legApplied.length ? '建議接續改道' : '建議改道'}・${rerouteTypeLabel(item)}（Leg ${index + 1}）`;
                         let rrHtml = `<div class="reroute-title">${titleText}</div>`;
                         validAlts.forEach((alt, ai) => {
                             const colorHexMap = {
@@ -2341,7 +2347,7 @@
                             noPanel.className = 'reroute-panel notice';
                             const reasonText = REROUTE_REASON_LABEL[item.reason] || item.reason || '建議依主線行駛';
                             const isComb = item.event_type === 'COMBINED';
-                            const subDesc = isComb ? '連續壅塞路段' : `壅塞路段 (${item.a_m}–${item.b_m}m)`;
+                            const subDesc = isComb ? `連續壅塞（${item.covers || 2} 處）` : `單點壅塞 (${item.a_m}–${item.b_m}m)`;
                             const titleText = legApplied.length ? `⚠️ 套用後路段仍有壅塞（Leg ${index + 1}）` : `⚠️ 壅塞未改道（Leg ${index + 1}）`;
                             noPanel.innerHTML = `<div class="reroute-title" style="color:#b45309;">${titleText}</div><div style="font-size:11px; color:#78350f; line-height:1.4;">${subDesc}：${reasonText}</div>`;
                             flowContainer.appendChild(noPanel);
