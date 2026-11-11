@@ -266,6 +266,7 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
                 "road_class": vd.get("RoadClass"),
                 "speed": speed,
                 "speed_valid": entry.get("speed_valid") if entry else False,
+                "anomaly_reason": entry.get("anomaly_reason") if entry else None,
                 "color": color,
                 "level": level,
                 "level_name": level_label,
@@ -783,7 +784,7 @@ def _duration_over(merged: List[List[float]], d0: float, d1: float,
         bb = min(b, d1)
         if aa > cursor:
             total += (aa - cursor) / nom_speed_mps
-        vs = max(float(v) / 3.6, 0.5)
+        vs = max(float(v) / 3.6, 8.0 / 3.6)
         total += (bb - aa) / vs
         cursor = bb
     if cursor < d1:

@@ -1710,7 +1710,10 @@
                 const eff = effectiveVd(pt.vdid);
                 const iconColor = pt.on_route ? (VD_COLORS[eff.color] || VD_COLORS.GRAY)
                     : (pt.speed > 0 ? (VD_COLORS[eff.color] || VD_WARN_COLOR) : VD_WARN_COLOR);
-                const speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
+                let speedTxt = (pt.speed != null && pt.speed > 0) ? `${pt.speed} km/h` : '無即時資料';
+                if (pt.anomaly_reason) {
+                    speedTxt += ` <span style="color:#d9534f;font-weight:bold;">(⚠️ ${pt.anomaly_reason}，已套用預設綠色標準)</span>`;
+                }
                 const statusTxt = (pt.status === 0 || pt.status === '0') ? '正常' : (pt.status == null ? '無即時資料' : `異常 (${pt.status})`);
                 const timeTxt = pt.collect_time ? String(pt.collect_time).replace('T', ' ').slice(0, 19) : '—';
                 const routeTxt = pt.on_route ? '是（沿線滾動顯示）' : '否';

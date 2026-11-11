@@ -53,8 +53,8 @@ CONGESTION_TTL_SEC = 6 * 3600
 # 公路局 fallback 門檻（無官方逐路段定義時使用，單位 km/h）
 FALLBACK_LEVEL_SPEED = [(40.0, 1), (20.0, 3), (0.0, 5)]
 
-# 車速合理範圍（km/h）：超出視為偵測器異常，歸類為綠燈（順暢）
-SPEED_VALID_MIN = 0.5
+# 車速合理範圍（km/h）：低於 8.0 km/h 或大於 150 km/h 視為偵測器異常，改採預設綠色標準
+SPEED_VALID_MIN = 8.0
 SPEED_VALID_MAX = 150.0
 
 
@@ -312,7 +312,7 @@ def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str,
 
     force_live=True 時跳過即時資料快取（速度/路段），每次皆重新向 TDX 取號誌；
     靜態設備清單與壅塞門檻定義仍走長快取。
-    車速不合理（<0.5 或 >150 km/h）視為偵測器異常 → 歸類為 GREEN（level 1）。
+    車速不合理（<8.0 或 >150 km/h）視為偵測器異常 → 歸類為 GREEN（level 1），並標註異常。
     """
     result: Dict[str, Dict[str, Any]] = {}
     for city in cities:
@@ -333,10 +333,25 @@ def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str,
             speed = extract_speed(entry)
             status = entry.get("Status")
             levels = levels_by_vdid.get(vdid)
+            anomaly_reason = None
             if speed is None or status not in (None, 0):
                 color, level, speed_valid, levels = "GRAY", None, False, None
             elif not is_speed_valid(speed):
                 color, level, speed_valid = "GREEN", 1, False
+                if speed < SPEED_VALID_MIN:
+                    anomaly_reason = f"車速低於下限 ({speed:.1f} < {SPEED_VALID_MIN} km/h)"
+                else:
+                    anomaly_reason = f"車速高於上限 ({speed:.1f} > {SPEED_VALID_MAX} km/h)"
+                # 異常時以該路段等級 1 (A級綠色) 代表速作為預設速度，若無則預設 50.0 km/h
+                green_speed = 50.0
+                if levels:
+                    for lv in levels:
+                        if lv.get("Level") == 1:
+                            lo = float(lv.get("LowValue") or 0.0)
+                            top = float(lv.get("TopValue") or (lo + 20.0))
+                            green_speed = round((lo + top) / 2.0, 1)
+                            break
+                speed = green_speed
             else:
                 level = classify_congestion(speed, levels)
                 color = level_color(level)
@@ -346,6 +361,7 @@ def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str,
                 "status": status,
                 "collect_time": entry.get("DataCollectTime"),
                 "speed_valid": speed_valid,
+                "anomaly_reason": anomaly_reason,
                 "level": level,
                 "level_name": level_name(levels, level),
                 "color": color,
