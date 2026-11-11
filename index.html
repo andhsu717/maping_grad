@@ -1429,52 +1429,71 @@
             vdids.forEach(v => { if (lv === 0) delete vdManualOverride[v]; else vdManualOverride[v] = lv; });
         }
 
-        // 以即時/模擬 VD 速度融合覆蓋段 ETA，並依最嚴重色設定 leg 顏色
+        /* ===== 行駛時間計算（與後端 base_time_s / travel_time_s 同一規則） =====
+           未被偵測器覆蓋：路名基準速度剖面 speed_segments [起m, 終m, m/s]
+           偵測器覆蓋段：改用偵測器車速（下限 8 km/h）；相鄰覆蓋段已於後端在中點平分，不重疊 */
+        const TIME_FLOOR_KMH = 8;
+
+        function baseTimeS(segs, d0, d1) {
+            if (!(d1 > d0)) return 0;
+            if (!segs || !segs.length) return (d1 - d0) / (60 / 3.6);
+            let t = 0;
+            for (const [a, b, v] of segs) {
+                if (b <= d0) continue;
+                if (a >= d1) break;
+                t += (Math.min(b, d1) - Math.max(a, d0)) / v;
+            }
+            if (d0 < segs[0][0]) t += (Math.min(d1, segs[0][0]) - d0) / segs[0][2];
+            const last = segs[segs.length - 1];
+            if (d1 > last[1]) t += (d1 - Math.max(d0, last[1])) / last[2];
+            return t;
+        }
+
+        function travelTimeS(segs, ivs, d0, d1) {
+            let t = baseTimeS(segs, d0, d1);
+            ivs.forEach(iv => {
+                const aa = Math.max(iv.a, d0), bb = Math.min(iv.b, d1);
+                if (bb <= aa) return;
+                t += (bb - aa) / (Math.max(iv.speed, TIME_FLOOR_KMH) / 3.6) - baseTimeS(segs, aa, bb);
+            });
+            return t;
+        }
+
+        // 覆蓋段 → 不重疊區間 {a, b, speed, color}（含無效車速者，speed=0）
+        function coverageIntervals(trip) {
+            const out = [];
+            ((trip.vd_result && trip.vd_result.coverage) || []).forEach(cov => {
+                if (cov.s_m == null) return;
+                const eff = effectiveVd(cov.vdid, cov.dir_links);
+                out.push({ a: cov.s_m - (cov.back_m || 0), b: cov.s_m + (cov.fwd_m || 0), speed: eff.speed || 0, color: eff.color });
+            });
+            out.sort((x, y) => x.a - y.a);
+            for (let i = 1; i < out.length; i++) if (out[i].a < out[i - 1].b) out[i].a = out[i - 1].b;
+            return out.filter(iv => iv.b > iv.a);
+        }
+
+        // 以即時/模擬 VD 速度計算各 leg 行駛時間，並依最嚴重色設定 leg 顏色
         function applyVdEta(trip) {
             if (!trip.route_result || !trip.route_result.legs) return;
             const legs = trip.route_result.legs;
-            legs.forEach(l => {
-                l.duration_min = (l.base_duration_min != null) ? l.base_duration_min : l.duration_min;
-                l.traffic_status = l.base_traffic_status || 'GREEN';
-            });
-            const coverage = (trip.vd_result && trip.vd_result.coverage) || [];
-            const byLeg = {};
-            coverage.forEach(cov => {
-                if (cov.leg_index == null || cov.s_m == null) return;
-                const slot = byLeg[cov.leg_index] = byLeg[cov.leg_index] || { intervals: [], worst: 'GRAY' };
-                const eff = effectiveVd(cov.vdid, cov.dir_links);
-                if (!eff.speed || eff.speed <= 0) return;
-                slot.intervals.push({
-                    a: cov.s_m - (cov.back_m || 0),
-                    b: cov.s_m + (cov.fwd_m || 0),
-                    speed: Math.max(8, Math.min(eff.speed, 90))   // 低於 8 km/h 仍判壅塞，但計時以 8 km/h 為下限
-                });
-                slot.worst = worstColor(slot.worst, eff.color);
-            });
-            Object.keys(byLeg).forEach(li => {
-                const leg = legs[Number(li)];
-                if (!leg) return;
-                const slot = byLeg[li];
-                leg.traffic_status = slot.worst || 'GRAY';
-                if (!slot.intervals.length) return;
-                const baseS = (leg.base_duration_min != null ? leg.base_duration_min : leg.duration_min) * 60;
-                const distM = leg.distance_km * 1000;
-                if (baseS <= 0 || distM <= 0) return;
-                const nomSpeed = distM / baseS;
-                const iv = slot.intervals.sort((x, y) => x.a - y.a);
-                const merged = [];
-                iv.forEach(x => {
-                    const m = merged[merged.length - 1];
-                    if (m && x.a <= m.b) { m.b = Math.max(m.b, x.b); m.speed = Math.min(m.speed, x.speed); }
-                    else merged.push({ a: x.a, b: x.b, speed: x.speed });
-                });
-                let adjS = 0;
-                merged.forEach(m => {
-                    const d = Math.max(0, m.b - m.a);
-                    const vs = m.speed / 3.6;
-                    if (vs > 0) adjS += d / vs - d / nomSpeed;
-                });
-                leg.duration_min = Math.max(0.1, Math.round(((baseS + adjS) / 60) * 10) / 10);
+            const meta = trip.route_meta || {};
+            const segs = meta.speed_segments || [];
+            const bounds = meta.leg_boundaries || [];
+            const ivs = coverageIntervals(trip);
+            const validIvs = ivs.filter(iv => iv.speed > 0);
+            legs.forEach((leg, i) => {
+                const base = (leg.base_duration_min != null) ? leg.base_duration_min : leg.duration_min;
+                leg.duration_min = base;
+                leg.traffic_status = leg.base_traffic_status || 'GREEN';
+                if (!segs.length || i >= bounds.length) return;
+                const d0 = i > 0 ? bounds[i - 1] : 0;
+                const d1 = bounds[i];
+                const inLeg = ivs.filter(iv => iv.b > d0 && iv.a < d1);
+                if (!inLeg.length) return;
+                leg.traffic_status = inLeg.reduce((w, iv) => worstColor(w, iv.color), 'GRAY');
+                // 基準時間 + 覆蓋段改用偵測器車速的差額（不重算基準，避免與後端取整差異造成跳動）
+                const deltaS = travelTimeS(segs, validIvs, d0, d1) - baseTimeS(segs, d0, d1);
+                leg.duration_min = Math.max(0.1, Math.round((base + deltaS / 60) * 10) / 10);
             });
             trip.route_result.duration_min = Math.round(legs.reduce((s, l) => s + l.duration_min, 0) * 10) / 10;
         }
@@ -1526,29 +1545,6 @@
             }
             out.push(pathPointAt(path, cum, d1));
             return out.filter(Boolean);
-        }
-
-        function dedupeAdjacentPoints(pts) {
-            if (!pts || !pts.length) return [];
-            const res = [pts[0]];
-            for (let i = 1; i < pts.length; i++) {
-                const prev = res[res.length - 1];
-                const cur = pts[i];
-                if (Math.abs(prev[0] - cur[0]) > 1e-7 || Math.abs(prev[1] - cur[1]) > 1e-7) {
-                    res.push(cur);
-                }
-            }
-            return res;
-        }
-
-        function splicePathSegment(currentPath, currentCum, p1_m, p2_m, altSeg) {
-            if (!currentPath || !currentCum || currentCum.length !== currentPath.length) return null;
-            const total = currentCum[currentCum.length - 1];
-            let path = [];
-            path = path.concat(slicePathByMileage(currentPath, currentCum, 0, p1_m));
-            path = path.concat(altSeg || []);
-            path = path.concat(slicePathByMileage(currentPath, currentCum, p2_m, total));
-            return dedupeAdjacentPoints(path);
         }
 
         function isPathRevertingToReplacedSegment(altPath, replacedSeg) {
@@ -1636,7 +1632,9 @@
                         coverage: coverage,
                         vds: vds,
                         counties: (trip.vd_result && trip.vd_result.counties) || [],
-                        legs: legs
+                        legs: legs,
+                        speed_segments: meta.speed_segments || [],
+                        road_segments: meta.road_segments || []
                     })
                 });
                 if (!resp.ok) {
@@ -1672,6 +1670,20 @@
             }
         }
 
+        // 取出 [d0, d1] 範圍內的區間清單 [[a, b, x], ...]，並平移為以 d0 為起點
+        function clipShiftSegments(list, d0, d1) {
+            const out = [];
+            (list || []).forEach(([a, b, x]) => {
+                const aa = Math.max(a, d0), bb = Math.min(b, d1);
+                if (bb > aa) out.push([aa - d0, bb - d0, x]);
+            });
+            return out;
+        }
+
+        function clipShiftTurns(turns, d0, d1) {
+            return (turns || []).filter(t => t > d0 && t < d1).map(t => t - d0);
+        }
+
         async function applyReroute(tripKey, eventId, altIndex) {
             const trip = tripStore[tripKey];
             if (!trip || !trip.route_result || !trip.rerouteOptions) return;
@@ -1681,80 +1693,99 @@
             if (!alt || !alt.seg_polyline) return;
             const legIndex = item.leg_index;
 
+            // 將替代路段拼接至當前最新生效之路徑中（支援持續接續改道）：原路前段 + 替代路 + 原路後段
+            const meta = trip.route_meta || {};
+            const currentPath = trip.route_result.polyline;
+            const currentCum = meta.cum || [];
+            if (!currentPath || currentCum.length !== currentPath.length) {
+                console.error('路徑拼接失敗：路線里程資料不一致');
+                return;
+            }
+            const total = currentCum[currentCum.length - 1];
+            const p1 = alt.p1_m, p2 = alt.p2_m;
+            const pieces = [
+                {
+                    path: slicePathByMileage(currentPath, currentCum, 0, p1),
+                    speed_segments: clipShiftSegments(meta.speed_segments, 0, p1),
+                    road_segments: clipShiftSegments(meta.road_segments, 0, p1),
+                    turn_boundaries: clipShiftTurns(meta.turn_boundaries, 0, p1)
+                },
+                {
+                    path: alt.seg_polyline,
+                    speed_segments: alt.seg_speed_segments || [],
+                    road_segments: alt.seg_road_segments || [],
+                    turn_boundaries: alt.seg_turns || []
+                },
+                {
+                    path: slicePathByMileage(currentPath, currentCum, p2, total),
+                    speed_segments: clipShiftSegments(meta.speed_segments, p2, total),
+                    road_segments: clipShiftSegments(meta.road_segments, p2, total),
+                    turn_boundaries: clipShiftTurns(meta.turn_boundaries, p2, total)
+                }
+            ];
+            const replacedSeg = slicePathByMileage(currentPath, currentCum, p1, p2);
+            const stopCoords = (trip.route_result.sequence || []).map(s => [s.lat, s.lon]);
+
+            // 向後端請求新路徑重比對 (Re-profile)：重算剖面、leg 距離/基準時間與偵測器覆蓋
+            let data = null;
+            try {
+                const resp = await fetch(`${API_BASE}/api/route/reprofile`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        pieces: pieces,
+                        counties: (trip.vd_result && trip.vd_result.counties) || [],
+                        leg_boundaries: meta.leg_boundaries || [],
+                        stop_coordinates: stopCoords
+                    })
+                });
+                if (resp.ok) data = await resp.json();
+            } catch (err) {
+                console.error('新路徑重比對失敗:', err);
+            }
+            if (!data || data.status !== 'success') {
+                alert('套用改道失敗：後端無法重新計算新路線，路線維持不變。');
+                return;
+            }
+
             // 備份初始原始路徑（僅在第一次改道時儲存，供清除工具一鍵恢復完整原定計畫）
             if (!trip.originalRoute) {
                 trip.originalRoute = {
                     polyline: JSON.parse(JSON.stringify(trip.route_result.polyline || [])),
-                    cum: (trip.route_meta && trip.route_meta.cum) ? trip.route_meta.cum.slice() : [],
                     legs: JSON.parse(JSON.stringify(trip.route_result.legs || [])),
                     vd_result: JSON.parse(JSON.stringify(trip.vd_result || {})),
                     route_meta: JSON.parse(JSON.stringify(trip.route_meta || {}))
                 };
             }
-
-            // 將替代路段動態拼接至當前最新生效之路徑中（支援持續接續改道）
-            const currentPath = trip.route_result.polyline;
-            const currentCum = (trip.route_meta && trip.route_meta.cum) ? trip.route_meta.cum : [];
-            const newPath = splicePathSegment(currentPath, currentCum, alt.p1_m, alt.p2_m, alt.seg_polyline);
-            if (!newPath || newPath.length < 2) {
-                console.error('路徑拼接失敗');
-                return;
-            }
-
-            const replacedSeg = slicePathByMileage(currentPath, currentCum, alt.p1_m, alt.p2_m);
             trip.replacedSegments = trip.replacedSegments || [];
-            if (replacedSeg && replacedSeg.length >= 2) {
-                trip.replacedSegments.push(replacedSeg);
-            }
-
+            if (replacedSeg && replacedSeg.length >= 2) trip.replacedSegments.push(replacedSeg);
             trip.appliedReroutes = trip.appliedReroutes || {};
             trip.appliedReroutes[eventId] = {
                 event_id: eventId,
                 leg_index: legIndex,
                 alt_index: altIndex,
                 alt: alt,
-                p1_m: alt.p1_m,
-                p2_m: alt.p2_m
+                p1_m: p1,
+                p2_m: p2
             };
 
-            const stopCoords = (trip.route_result.sequence || []).map(s => [s.lat, s.lon]);
-
-            // 向後端請求新路徑重比對 (Re-profile)，動態重算偵測器顯示、可互動點位與覆蓋線條
-            try {
-                const resp = await fetch(`${API_BASE}/api/route/reprofile`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        polyline: newPath,
-                        counties: (trip.vd_result && trip.vd_result.counties) || [],
-                        leg_boundaries: (trip.route_meta && trip.route_meta.leg_boundaries) || [],
-                        stop_coordinates: stopCoords
-                    })
-                });
-                if (resp.ok) {
-                    const data = await resp.json();
-                    if (data.status === 'success') {
-                        trip.route_result.polyline = data.polyline;
-                        trip.vd_result = {
-                            counties: data.counties,
-                            points: data.vd_points,
-                            coverage: data.vd_coverage
-                        };
-                        trip.route_meta = data.route_meta;
-                    }
-                }
-            } catch (err) {
-                console.error('新路徑重比對失敗:', err);
-                trip.route_result.polyline = newPath;
-            }
-
+            trip.route_result.polyline = data.polyline;
+            trip.vd_result = {
+                counties: data.counties,
+                points: data.vd_points,
+                coverage: data.vd_coverage
+            };
+            trip.route_meta = data.route_meta;
+            // 各 leg 距離與基準時間改由新剖面重算（不再以加減估算）
+            (data.legs || []).forEach(nl => {
+                const leg = (trip.route_result.legs || [])[nl.leg_index];
+                if (!leg) return;
+                leg.distance_km = nl.distance_km;
+                leg.base_duration_min = nl.base_duration_min;
+            });
             const leg = (trip.route_result.legs || [])[legIndex];
-            const origLeg = (trip.originalRoute.legs || [])[legIndex];
-            if (leg && origLeg) {
-                const curBase = (leg.base_duration_min != null) ? leg.base_duration_min : origLeg.duration_min;
-                leg.base_duration_min = Math.max(0.1, Math.round((curBase - (alt.base_p1p2_min || 0) + (alt.alt_p1p2_min || 0)) * 10) / 10);
-                leg.base_traffic_status = 'GREEN';
-            }
+            if (leg) leg.base_traffic_status = 'GREEN';
+            trip.route_result.distance_km = Math.round((trip.route_result.legs || []).reduce((s, l) => s + (l.distance_km || 0), 0) * 100) / 100;
             applyVdEta(trip);
 
             // 清空舊改道選項，等待新路況與幾何的持續偵測掃描
@@ -1779,13 +1810,10 @@
                 if (trip.originalRoute.route_meta) {
                     trip.route_meta = JSON.parse(JSON.stringify(trip.originalRoute.route_meta));
                 }
-                (trip.originalRoute.legs || []).forEach((ol, i) => {
-                    const leg = (trip.route_result.legs || [])[i];
-                    if (leg) {
-                        leg.base_duration_min = ol.base_duration_min;
-                        leg.base_traffic_status = ol.base_traffic_status;
-                    }
-                });
+                if (trip.originalRoute.legs) {
+                    trip.route_result.legs = JSON.parse(JSON.stringify(trip.originalRoute.legs));
+                    trip.route_result.distance_km = Math.round(trip.route_result.legs.reduce((s, l) => s + (l.distance_km || 0), 0) * 100) / 100;
+                }
                 trip.appliedReroutes = {};
                 trip.replacedSegments = [];
                 trip.originalRoute = null;

@@ -139,8 +139,10 @@ def _road_name_compatible(vd_name: str, seg_name: str) -> bool:
 
 
 def _project_point_to_path(pt_lat: float, pt_lon: float,
-                           path: List[List[float]], cum: List[float]) -> Tuple[float, float]:
-    """將點投影到折線上，回傳 (最近水平距離 m, 沿線累積里程 m)。"""
+                           path: List[List[float]], cum: List[float],
+                           min_s: float = 0.0) -> Tuple[float, float]:
+    """將點投影到折線上，回傳 (最近水平距離 m, 沿線累積里程 m)。
+    min_s > 0 時只搜尋里程 ≥ min_s 的部分（依序投影站點，避免路線重疊時投影到錯的一趟）。"""
     lat0 = math.radians(pt_lat)
     mx = 111320.0 * math.cos(lat0)
     my = 110540.0
@@ -149,6 +151,8 @@ def _project_point_to_path(pt_lat: float, pt_lon: float,
     best_off = float("inf")
     best_s = 0.0
     for i in range(len(path) - 1):
+        if min_s > 0 and cum[i + 1] < min_s:
+            continue
         ax = path[i][1] * mx; ay = path[i][0] * my
         bx = path[i + 1][1] * mx; by = path[i + 1][0] * my
         dx = bx - ax; dy = by - ay
@@ -220,16 +224,16 @@ def _offset_latlon(lat: float, lon: float, bearing_deg: float, dist_m: float) ->
 
 def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
                        force_live: bool = False) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """比對 VD 與路線，產生標記點與「±500m、遇轉彎截斷」的覆蓋子折線。"""
+    """比對 VD 與路線，產生標記點與「±500m、遇轉彎截斷、相鄰中點平分」的覆蓋子折線。"""
     path = profile.get("path") or []
     cum = profile.get("cum") or []
     turns = profile.get("turn_boundaries") or []
     leg_bounds = profile.get("leg_boundaries") or []
     road_segs = profile.get("road_segments") or []
     points: List[Dict[str, Any]] = []
-    coverage: List[Dict[str, Any]] = []
+    hits: List[Dict[str, Any]] = []
     if len(path) < 2 or not cities:
-        return points, coverage
+        return points, []
 
     live = tdx_client.live_map(cities, force_live=force_live)
     seen: set = set()
@@ -288,28 +292,9 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
 
             if not on_route:
                 continue
-
-            back_turn = max([t for t in turns if t <= s], default=0.0)
-            fwd_turn = min([t for t in turns if t >= s], default=cum[-1])
-            back_len = min(EXTEND_M, s - back_turn)
-            fwd_len = min(EXTEND_M, fwd_turn - s)
-            seg = _slice_path(path, cum, s - back_len, s + fwd_len)
-            if len(seg) < 2:
-                continue
-
-            leg_index = max(0, len(leg_bounds) - 1)
-            for i, b in enumerate(leg_bounds):
-                if s <= b:
-                    leg_index = i
-                    break
-
-            coverage.append({
+            hits.append({
                 "vdid": vdid,
-                "leg_index": leg_index,
-                "s_m": round(s, 1),
-                "path": seg,
-                "back_m": round(back_len, 1),
-                "fwd_m": round(fwd_len, 1),
+                "s": s,
                 "dir_links": dir_links or [],
                 "color": color,
                 "level": level,
@@ -317,7 +302,52 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
                 "speed": speed,
                 "collect_time": entry.get("collect_time"),
             })
+    coverage = _coverage_from_hits(path, cum, turns, leg_bounds, hits)
     return points, coverage
+
+
+def _coverage_from_hits(path: List[List[float]], cum: List[float], turns: List[float],
+                        leg_bounds: List[float], hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """依偵測器沿線位置 (hit["s"]) 建立覆蓋段：前後各延伸 500m、遇轉彎截斷；
+    相鄰偵測器範圍重疊時，於兩偵測器中點平分，各自只負責自己那一半。"""
+    if len(path) < 2 or not cum:
+        return []
+    total = cum[-1]
+    items: List[List[Any]] = []
+    for h in sorted(hits, key=lambda x: x["s"]):
+        s = float(h["s"])
+        back_turn = max([t for t in turns if t <= s], default=0.0)
+        fwd_turn = min([t for t in turns if t >= s], default=total)
+        items.append([h, max(0.0, min(EXTEND_M, s - back_turn)), max(0.0, min(EXTEND_M, fwd_turn - s))])
+    for i in range(len(items) - 1):
+        s0 = float(items[i][0]["s"])
+        s1 = float(items[i + 1][0]["s"])
+        if s0 + items[i][2] > s1 - items[i + 1][1]:
+            mid = (s0 + s1) / 2.0
+            items[i][2] = max(0.0, min(items[i][2], mid - s0))
+            items[i + 1][1] = max(0.0, min(items[i + 1][1], s1 - mid))
+
+    out: List[Dict[str, Any]] = []
+    for h, back_len, fwd_len in items:
+        s = float(h["s"])
+        seg = _slice_path(path, cum, s - back_len, s + fwd_len)
+        if len(seg) < 2:
+            continue
+        leg_index = max(0, len(leg_bounds) - 1)
+        for i, b in enumerate(leg_bounds):
+            if s <= b:
+                leg_index = i
+                break
+        cov = {k: v for k, v in h.items() if k != "s"}
+        cov.update({
+            "leg_index": leg_index,
+            "s_m": round(s, 1),
+            "path": seg,
+            "back_m": round(back_len, 1),
+            "fwd_m": round(fwd_len, 1),
+        })
+        out.append(cov)
+    return out
 
 # ================= 資料模型 =================
 class DepotItem(BaseModel):
@@ -462,6 +492,196 @@ def open_tsp_2opt(node_indices: List[int], dist_matrix: List[List[float]], start
     return route
 
 # ================= 道路類型車速解析與路徑幾何計算 =================
+DEFAULT_BASE_SPEED_MPS = 60.0 / 3.6   # 無路名資訊時的基準速度（市區道路 60 km/h）
+FALLBACK_DETOUR_FACTOR = 1.3          # OSRM 無法使用時，直線距離的道路彎曲折減率
+TIME_FLOOR_KMH = 8.0                  # 偵測器車速計時下限（低於此值仍判壅塞，但以此速度計時）
+
+
+def _step_speed_mps(step: Dict[str, Any]) -> float:
+    """OSRM step 的基準計時速度：min(路網速度, 路名分類速限)。"""
+    s_dist = float(step.get("distance") or 0.0)
+    s_dur = float(step.get("duration") or 0.0)
+    rtype = classify_street(step.get("name", ""), step.get("ref", ""))
+    cap_mps = ROAD_RULES[rtype]["speed_cap_kmh"] / 3.6
+    orig_mps = (s_dist / s_dur) if s_dur > 0 else cap_mps * 0.8
+    eff = min(orig_mps, cap_mps)
+    return eff if eff > 0 else cap_mps
+
+
+def _normalize_speed_segments(segs: List[List[float]], total: float) -> List[List[float]]:
+    """排序並補齊縫隙（沿用前一段速度），確保 [0, total] 全段都有基準速度。"""
+    clean: List[List[float]] = []
+    for a, b, v in (segs or []):
+        a, b, v = float(a), min(float(b), total), float(v)
+        if b > a and v > 0 and a < total:
+            clean.append([a, b, v])
+    clean.sort(key=lambda x: x[0])
+    out: List[List[float]] = []
+    for a, b, v in clean:
+        if out and a < out[-1][1]:
+            a = out[-1][1]
+            if b <= a:
+                continue
+        if out and a > out[-1][1]:
+            out[-1][1] = a
+        out.append([a, b, v])
+    if not out:
+        return [[0.0, total, DEFAULT_BASE_SPEED_MPS]] if total > 0 else []
+    out[0][0] = 0.0
+    out[-1][1] = total
+    return out
+
+
+def base_time_s(segs: List[List[float]], d0: float, d1: float) -> float:
+    """里程 [d0, d1] 依基準速度剖面（路名速限）的行駛秒數。"""
+    if d1 <= d0:
+        return 0.0
+    if not segs:
+        return (d1 - d0) / DEFAULT_BASE_SPEED_MPS
+    t = 0.0
+    for a, b, v in segs:
+        if b <= d0:
+            continue
+        if a >= d1:
+            break
+        t += (min(b, d1) - max(a, d0)) / v
+    if d0 < segs[0][0]:
+        t += (min(d1, segs[0][0]) - d0) / segs[0][2]
+    if d1 > segs[-1][1]:
+        t += (d1 - max(d0, segs[-1][1])) / segs[-1][2]
+    return t
+
+
+def coverage_intervals(coverage: List[Dict[str, Any]]) -> List[List[float]]:
+    """覆蓋段 → 不重疊的 [a_m, b_m, speed_kmh]（只取有有效車速者）。"""
+    ivs: List[List[float]] = []
+    for c in coverage or []:
+        try:
+            spd = float(c.get("speed") or 0.0)
+            s = float(c.get("s_m"))
+            a = s - float(c.get("back_m") or 0.0)
+            b = s + float(c.get("fwd_m") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if spd > 0 and b > a:
+            ivs.append([a, b, spd])
+    ivs.sort(key=lambda x: x[0])
+    out: List[List[float]] = []
+    for a, b, v in ivs:
+        if out and a < out[-1][1]:
+            a = out[-1][1]
+        if b > a:
+            out.append([a, b, v])
+    return out
+
+
+def travel_time_s(segs: List[List[float]], ivs: List[List[float]], d0: float, d1: float) -> float:
+    """里程 [d0, d1] 行駛秒數：未覆蓋部分用路名基準速度，偵測器覆蓋部分改用偵測器車速（下限 8 km/h）。"""
+    t = base_time_s(segs, d0, d1)
+    for a, b, v in ivs:
+        aa = max(a, d0)
+        bb = min(b, d1)
+        if bb <= aa:
+            continue
+        t += (bb - aa) / (max(float(v), TIME_FLOOR_KMH) / 3.6) - base_time_s(segs, aa, bb)
+    return t
+
+
+def profile_from_osrm_route(route: Dict[str, Any]) -> Dict[str, Any]:
+    """由 OSRM route（steps=true）建立路線剖面：
+    path/cum（幾何與累積里程）、turn_boundaries（轉彎點）、leg_boundaries（各 leg 終點）、
+    road_segments（[起m, 終m, 路名]）、speed_segments（[起m, 終m, 基準速度 m/s]）、leg_streets（各 leg 路名）。"""
+    path: List[List[float]] = []
+    cum: List[float] = [0.0]
+    turns: List[float] = []
+    leg_bounds: List[float] = []
+    roads: List[List[Any]] = []
+    speeds: List[List[float]] = []
+    leg_streets: List[List[str]] = []
+
+    def _append(lat: float, lng: float):
+        if path:
+            prev = path[-1]
+            if abs(prev[0] - lat) < 1e-9 and abs(prev[1] - lng) < 1e-9:
+                return
+            cum.append(cum[-1] + haversine_distance_meters(prev[0], prev[1], lat, lng))
+        path.append([lat, lng])
+
+    legs = route.get("legs", []) or []
+    for leg in legs:
+        names: List[str] = []
+        for step in leg.get("steps", []) or []:
+            st_name = step.get("name", "") or ""
+            st_ref = step.get("ref", "") or ""
+            if st_name and st_name not in names:
+                names.append(st_name)
+            seg_start = cum[-1]
+            if path and is_turn_step(step):
+                turns.append(cum[-1])
+            for pt in (step.get("geometry") or {}).get("coordinates", []):
+                _append(pt[1], pt[0])
+            seg_end = cum[-1]
+            if seg_end > seg_start:
+                seg_name = st_name or st_ref
+                if seg_name:
+                    roads.append([seg_start, seg_end, seg_name])
+                speeds.append([seg_start, seg_end, _step_speed_mps(step)])
+        leg_bounds.append(cum[-1])
+        leg_streets.append(names)
+
+    if len(path) < 2:
+        # step 幾何缺失：改用整體幾何，速度取 OSRM 平均
+        path, cum = [], [0.0]
+        for c in (route.get("geometry") or {}).get("coordinates", []):
+            _append(c[1], c[0])
+        total = cum[-1]
+        dur = float(route.get("duration") or 0.0)
+        speeds = [[0.0, total, (total / dur) if dur > 0 and total > 0 else DEFAULT_BASE_SPEED_MPS]]
+        turns, roads = [], []
+        leg_bounds = [total] * max(1, len(legs))
+
+    total = cum[-1] if cum else 0.0
+    return {
+        "path": path,
+        "cum": cum,
+        "turn_boundaries": turns,
+        "leg_boundaries": leg_bounds,
+        "road_segments": roads,
+        "speed_segments": _normalize_speed_segments(speeds, total),
+        "leg_streets": leg_streets,
+    }
+
+
+def _route_result(prof: Dict[str, Any], geometry: List[List[float]], detour: float = 1.0) -> Dict[str, Any]:
+    """由剖面整理各 leg 距離與基準時間（路名速限）。"""
+    segs = prof["speed_segments"]
+    legs_result = []
+    prev = 0.0
+    total_dist_m = 0.0
+    for i, end in enumerate(prof["leg_boundaries"]):
+        names = prof["leg_streets"][i] if i < len(prof["leg_streets"]) else []
+        dist_m = max(0.0, end - prev) * detour
+        total_dist_m += dist_m
+        legs_result.append({
+            "leg_index": i,
+            "from_seq": i,
+            "to_seq": i + 1,
+            "distance_km": round(dist_m / 1000.0, 2),
+            "duration_min": round(base_time_s(segs, prev, end) / 60.0, 1),
+            "main_street": " → ".join(names[:3]) if names else "一般街道",
+            "traffic_status": "GREEN",
+        })
+        prev = end
+    total = prof["cum"][-1] if prof["cum"] else 0.0
+    return {
+        "geometry": geometry,
+        "total_distance_km": round(total_dist_m / 1000.0, 2),
+        "total_duration_min": round(base_time_s(segs, 0.0, total) / 60.0, 1),
+        "legs": legs_result,
+        "profile": prof,
+    }
+
+
 def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str, Any]:
     if len(ordered_coords) < 2:
         return {
@@ -469,13 +689,14 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             "total_distance_km": 0,
             "total_duration_min": 0,
             "legs": [],
-            "profile": {"path": [], "cum": [], "turn_boundaries": [], "leg_boundaries": [], "road_segments": []}
+            "profile": {"path": [], "cum": [], "turn_boundaries": [], "leg_boundaries": [],
+                        "road_segments": [], "speed_segments": [], "leg_streets": []}
         }
 
     # OSRM Route 支援最多約 80~100 點，開啟 steps=true 以獲取街道名稱與各步細節
     coords_str = ";".join([f"{float(c[0]):.6f},{float(c[1]):.6f}" for c in ordered_coords])
     url = f"{OSRM_BASE_URL}/route/v1/driving/{coords_str}?overview=full&geometries=geojson&steps=true"
-    
+
     try:
         resp = requests.get(url, headers=HEADERS, timeout=5)
         if resp.status_code == 200:
@@ -483,150 +704,28 @@ def compute_route_with_road_speed(ordered_coords: List[List[float]]) -> Dict[str
             if data.get("routes"):
                 route_info = data["routes"][0]
                 latlng_path = [[pt[1], pt[0]] for pt in route_info["geometry"]["coordinates"]]
-
-                legs_result = []
-                total_adjusted_duration_s = 0.0
-                total_distance_m = 0.0
-
-                # 路線剖面：沿線座標 + 累積里程 + 轉彎/分段邊界（供 VD 覆蓋段計算）
-                prof_path: List[List[float]] = []
-                prof_cum: List[float] = [0.0]
-                turn_boundaries: List[float] = []
-                leg_boundaries: List[float] = []
-                road_segments: List[List[Any]] = []  # [起m, 終m, 街名]（供 VD 路名比對）
-
-                def _append_prof(lat: float, lng: float):
-                    if prof_path:
-                        prev = prof_path[-1]
-                        if abs(prev[0] - lat) < 1e-9 and abs(prev[1] - lng) < 1e-9:
-                            return
-                        prof_cum.append(prof_cum[-1] + haversine_distance_meters(prev[0], prev[1], lat, lng))
-                    prof_path.append([lat, lng])
-
-                for leg_idx, leg in enumerate(route_info.get("legs", [])):
-                    leg_dist_m = 0.0
-                    leg_dur_s = 0.0
-                    street_names = []
-
-                    for step in leg.get("steps", []):
-                        s_dist = step.get("distance", 0.0)
-                        s_dur = step.get("duration", 0.0)
-                        st_name = step.get("name", "")
-                        st_ref = step.get("ref", "")
-
-                        if st_name and st_name not in street_names:
-                            street_names.append(st_name)
-
-                        seg_start_m = prof_cum[-1]
-
-                        # 進入此 step 若為轉彎，記錄轉彎邊界（累積里程）
-                        if prof_path and is_turn_step(step):
-                            turn_boundaries.append(prof_cum[-1])
-
-                        # 累積此 step 的幾何點
-                        for pt in (step.get("geometry") or {}).get("coordinates", []):
-                            _append_prof(pt[1], pt[0])
-
-                        # 街名區間（供 VD 路名比對；ref 可補名稱不足，如台61線）
-                        seg_name = st_name or st_ref
-                        if seg_name and prof_cum[-1] > seg_start_m:
-                            road_segments.append([seg_start_m, prof_cum[-1], seg_name])
-
-                        # 判定道路類型並取得速限上限 (大道路為 60 km/h)
-                        rtype = classify_street(st_name, st_ref)
-                        cap_speed_kmh = ROAD_RULES[rtype]["speed_cap_kmh"]
-                        cap_speed_mps = cap_speed_kmh / 3.6
-
-                        # 原始車速 (m/s)
-                        orig_speed_mps = (s_dist / s_dur) if s_dur > 0 else (cap_speed_mps * 0.8)
-                        effective_speed_mps = min(orig_speed_mps, cap_speed_mps)
-                        adj_step_dur = (s_dist / effective_speed_mps) if effective_speed_mps > 0 else s_dur
-
-                        leg_dist_m += s_dist
-                        leg_dur_s += adj_step_dur
-
-                    total_distance_m += leg_dist_m
-                    total_adjusted_duration_s += leg_dur_s
-                    leg_boundaries.append(prof_cum[-1] if len(prof_path) >= 2 else total_distance_m)
-
-                    # 箭頭顏色預設綠色 (GREEN)，之後可依 TDX 即時車流更新
-                    legs_result.append({
-                        "leg_index": leg_idx,
-                        "from_seq": leg_idx,
-                        "to_seq": leg_idx + 1,
-                        "distance_km": round(leg_dist_m / 1000.0, 2),
-                        "duration_min": round(leg_dur_s / 60.0, 1),
-                        "main_street": " → ".join(street_names[:3]) if street_names else "一般街道",
-                        "traffic_status": "GREEN"
-                    })
-
-                # 若 step 幾何缺失，改用路線整體幾何建立剖面
-                if len(prof_path) < 2:
-                    fb_path = latlng_path if len(latlng_path) >= 2 else [[p[1], p[0]] for p in ordered_coords]
-                    fb_cum = [0.0]
-                    for i in range(1, len(fb_path)):
-                        a, b = fb_path[i - 1], fb_path[i]
-                        fb_cum.append(fb_cum[-1] + haversine_distance_meters(a[0], a[1], b[0], b[1]))
-                    prof_path, prof_cum = fb_path, fb_cum
-                    turn_boundaries = []
-                    leg_boundaries = [prof_cum[-1]]
-
-                return {
-                    "geometry": latlng_path,
-                    "total_distance_km": round(total_distance_m / 1000.0, 2),
-                    "total_duration_min": round(total_adjusted_duration_s / 60.0, 1),
-                    "legs": legs_result,
-                    "profile": {
-                        "path": prof_path,
-                        "cum": prof_cum,
-                        "turn_boundaries": turn_boundaries,
-                        "leg_boundaries": leg_boundaries,
-                        "road_segments": road_segments,
-                    },
-                }
+                return _route_result(profile_from_osrm_route(route_info), latlng_path)
     except Exception as e:
         print(f"OSRM Route request error: {e}")
 
-    # Fallback 直線距離運算 (以大道路 60 km/h 估算)
-    fallback_path = [[c[1], c[0]] for c in ordered_coords]
-    legs_result = []
-    total_dist_m = 0.0
-    total_dur_s = 0.0
-
-    for i in range(len(ordered_coords) - 1):
-        c1, c2 = ordered_coords[i], ordered_coords[i+1]
-        dist_m = haversine_distance_meters(c1[1], c1[0], c2[1], c2[0]) * 1.3  # 道路彎曲折減率
-        dur_s = (dist_m / (60.0 / 3.6))  # 以 60 km/h 計算
-        total_dist_m += dist_m
-        total_dur_s += dur_s
-        legs_result.append({
-            "leg_index": i,
-            "from_seq": i,
-            "to_seq": i + 1,
-            "distance_km": round(dist_m / 1000.0, 2),
-            "duration_min": round(dur_s / 60.0, 1),
-            "main_street": "市區主要道路",
-            "traffic_status": "GREEN"
-        })
-
+    # Fallback：直線距離 × 道路彎曲折減率，以 60 km/h 估算
+    fb_path = [[c[1], c[0]] for c in ordered_coords]
     fb_cum = [0.0]
-    for i in range(1, len(fallback_path)):
-        a, b = fallback_path[i - 1], fallback_path[i]
+    for i in range(1, len(fb_path)):
+        a, b = fb_path[i - 1], fb_path[i]
         fb_cum.append(fb_cum[-1] + haversine_distance_meters(a[0], a[1], b[0], b[1]))
-
-    return {
-        "geometry": fallback_path,
-        "total_distance_km": round(total_dist_m / 1000.0, 2),
-        "total_duration_min": round(total_dur_s / 60.0, 1),
-        "legs": legs_result,
-        "profile": {
-            "path": fallback_path,
-            "cum": fb_cum,
-            "turn_boundaries": [],
-            "leg_boundaries": [fb_cum[-1]] if fb_cum else [],
-            "road_segments": [],
-        },
+    total = fb_cum[-1]
+    prof = {
+        "path": fb_path,
+        "cum": fb_cum,
+        "turn_boundaries": [],
+        "leg_boundaries": fb_cum[1:],
+        "road_segments": [],
+        "speed_segments": _normalize_speed_segments(
+            [[0.0, total, DEFAULT_BASE_SPEED_MPS / FALLBACK_DETOUR_FACTOR]], total),
+        "leg_streets": [["市區主要道路"] for _ in range(len(fb_path) - 1)],
     }
+    return _route_result(prof, fb_path, detour=FALLBACK_DETOUR_FACTOR)
 
 # ================= 單行程最佳化端點 =================
 @app.post("/api/optimize-single-trip")
@@ -645,7 +744,8 @@ def optimize_single_trip(payload: SingleTripRequest, force: bool = False):
             "counties": [],
             "vd_points": [],
             "vd_coverage": [],
-            "route_meta": {"cum": [], "turn_boundaries": [], "leg_boundaries": []}
+            "route_meta": {"cum": [], "turn_boundaries": [], "leg_boundaries": [],
+                           "road_segments": [], "speed_segments": []}
         }
 
     # 1. 站點聚合合併 (地址相同或 <= 30m 歸於同一個點)
@@ -728,7 +828,9 @@ def optimize_single_trip(payload: SingleTripRequest, force: bool = False):
         "route_meta": {
             "cum": route_calc["profile"]["cum"],
             "turn_boundaries": route_calc["profile"]["turn_boundaries"],
-            "leg_boundaries": route_calc["profile"]["leg_boundaries"]
+            "leg_boundaries": route_calc["profile"]["leg_boundaries"],
+            "road_segments": route_calc["profile"]["road_segments"],
+            "speed_segments": route_calc["profile"]["speed_segments"],
         }
     }
 
@@ -775,54 +877,36 @@ def _vd_path_reading(vd: Dict[str, Any], path: List[List[float]], cum: List[floa
     return tdx_client.direction_reading(entry, ids, vd.get("sim_level"))
 
 
-def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
-                          vds: List[Dict[str, Any]]) -> List[List[float]]:
-    """將 VD 投影到路徑，回傳合併後的覆蓋區間 [[a_m, b_m, speed_kmh], ...]。"""
-    intervals: List[List[float]] = []
-    total = cum[-1]
+def _path_coverage(prof: Dict[str, Any], vds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """任一路徑（如替代路）上的偵測器覆蓋段，與主線相同規則：
+    距離 ≤ 50m、路名相容、同行進方向、遇轉彎截斷、相鄰中點平分。
+    每段含 speed（有效車速，無效為 None）、color、anomaly_reason。"""
+    path, cum = prof["path"], prof["cum"]
+    roads = prof.get("road_segments") or []
+    hits: List[Dict[str, Any]] = []
     for vd in vds:
-        off, s = _project_point_to_path(float(vd["lat"]), float(vd["lon"]), path, cum)
+        try:
+            lat_v = float(vd["lat"])
+            lon_v = float(vd["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        off, s = _project_point_to_path(lat_v, lon_v, path, cum)
         if off > COVERAGE_THRESHOLD_M:
             continue
+        if roads and not _road_name_compatible(vd.get("road", ""), _road_name_at(roads, s)):
+            continue
         reading = _vd_path_reading(vd, path, cum, s)
-        if not reading or not reading.get("speed_valid"):
-            continue
-        spd = reading["speed"]
-        a = max(0.0, s - EXTEND_M)
-        b = min(total, s + EXTEND_M)
-        if b > a:
-            intervals.append([a, b, min(float(spd), 90.0)])
-    intervals.sort(key=lambda x: x[0])
-    merged: List[List[float]] = []
-    for a, b, v in intervals:
-        if merged and a <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], b)
-            merged[-1][2] = min(merged[-1][2], v)
-        else:
-            merged.append([a, b, v])
-    return merged
-
-
-def _duration_over(merged: List[List[float]], d0: float, d1: float,
-                   nom_speed_mps: float) -> float:
-    """里程 [d0,d1] 的行駛時間（秒）：基準速度 + VD 區間以實際速度替代。"""
-    if d1 <= d0 or nom_speed_mps <= 0:
-        return 0.0
-    total = 0.0
-    cursor = d0
-    for a, b, v in merged:
-        if b <= d0 or a >= d1:
-            continue
-        aa = max(a, d0)
-        bb = min(b, d1)
-        if aa > cursor:
-            total += (aa - cursor) / nom_speed_mps
-        vs = max(float(v) / 3.6, 8.0 / 3.6)
-        total += (bb - aa) / vs
-        cursor = bb
-    if cursor < d1:
-        total += (d1 - cursor) / nom_speed_mps
-    return total
+        if reading is None:
+            continue  # 對向偵測器，不屬於此路徑行進方向
+        valid = bool(reading.get("speed_valid"))
+        hits.append({
+            "vdid": vd.get("vdid", ""),
+            "s": s,
+            "speed": reading["speed"] if valid else None,
+            "color": reading.get("color") or "GRAY",
+            "anomaly_reason": None if valid else (reading.get("anomaly_reason") or "無資料"),
+        })
+    return _coverage_from_hits(path, cum, prof.get("turn_boundaries") or [], [], hits)
 
 
 def _max_deviation_m(alt_path: List[List[float]], alt_cum: List[float],
@@ -853,23 +937,6 @@ def _max_deviation_m(alt_path: List[List[float]], alt_cum: List[float],
         exit_at = alt_path[0]
         rejoin_at = alt_path[-1]
     return max_off, exit_at, rejoin_at
-
-
-def _capped_route_duration_s(route: Dict[str, Any]) -> float:
-    """OSRM route 依道路等級速限重算的總行駛秒數（與主線 compute_route_with_road_speed 同一套規則）。"""
-    total = 0.0
-    for leg in route.get("legs", []) or []:
-        for step in leg.get("steps", []) or []:
-            d = float(step.get("distance") or 0.0)
-            t = float(step.get("duration") or 0.0)
-            if d <= 0:
-                continue
-            rtype = classify_street(step.get("name", ""), step.get("ref", ""))
-            cap_mps = ROAD_RULES[rtype]["speed_cap_kmh"] / 3.6
-            orig = (d / t) if t > 0 else (cap_mps * 0.8)
-            eff = min(orig, cap_mps)
-            total += (d / eff) if eff > 0 else t
-    return total
 
 
 def get_via_point(p1: List[float], p2: List[float],
@@ -1020,11 +1087,13 @@ def _has_retrace_turn(path: List[List[float]]) -> bool:
 
 
 def _reroute_candidates(path: List[List[float]], cum: List[float],
-                        vds: List[Dict[str, Any]], merged_main: List[List[float]],
+                        main_segs: List[List[float]], main_ivs: List[List[float]],
+                        vds: List[Dict[str, Any]],
                         p1: float, p2: float, leg_start: float, leg_end: float,
-                        leg_nom: float, main_total_s: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                        main_total_s: float) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """以主動導航策略（exclude=motorway 與 P_via 側推）索取改道候選，
-    經速限重算、TDX 檢驗與全路徑總耗時比較，只回傳節省 > REROUTE_MIN_SAVED_MIN 的候選。"""
+    原路與替代路皆以「路名基準速度 + 偵測器覆蓋段改用偵測器車速」計時，
+    只回傳預估節省 > REROUTE_MIN_SAVED_MIN 的候選。"""
     stats: Dict[str, Any] = {
         "osrm_routes": 0,
         "nonfake_alts": 0,
@@ -1106,8 +1175,9 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         return [], stats
 
     stats["osrm_routes"] = len(raw_routes)
-    main_p1p2_s = _duration_over(merged_main, p1, p2, leg_nom)
-    base_p1p2_s = (p2 - p1) / leg_nom if leg_nom > 0 else 0.0
+    # 原路 P1→P2：未覆蓋用路名基準速度，覆蓋段用偵測器車速
+    main_p1p2_s = travel_time_s(main_segs, main_ivs, p1, p2)
+    base_p1p2_s = base_time_s(main_segs, p1, p2)
     alts: List[Dict[str, Any]] = []
 
     seen_geoms = set()
@@ -1116,7 +1186,8 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         if _has_uturn(rt):
             continue
 
-        alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
+        alt_prof = profile_from_osrm_route(rt)
+        alt_path, alt_cum = alt_prof["path"], alt_prof["cum"]
         if len(alt_path) < 2:
             continue
 
@@ -1131,10 +1202,6 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
             continue
         seen_geoms.add(geom_key)
 
-        alt_cum = [0.0]
-        for i in range(1, len(alt_path)):
-            alt_cum.append(alt_cum[-1] + haversine_distance_meters(
-                alt_path[i - 1][0], alt_path[i - 1][1], alt_path[i][0], alt_path[i][1]))
         alt_total_m = alt_cum[-1]
         if alt_total_m <= 0:
             continue
@@ -1145,12 +1212,10 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
             continue
         stats["nonfake_alts"] += 1
 
-        alt_osrm_s = _capped_route_duration_s(rt) or float(rt.get("duration") or 0.0)
-        alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
-
-        # 1. 預估基準省時（以一般道路速限基準計算，維持候選路線產出）
-        base_saved_min = (main_p1p2_s - alt_osrm_s) / 60.0
-        saved_min = base_saved_min
+        # 1. 預估省時：替代路以與原路相同的路名基準速度計時
+        alt_segs = alt_prof["speed_segments"]
+        alt_est_s = base_time_s(alt_segs, 0.0, alt_total_m)
+        saved_min = (main_p1p2_s - alt_est_s) / 60.0
 
         best_nonfake = stats["best_nonfake_saved_min"]
         if best_nonfake is None or saved_min > best_nonfake:
@@ -1158,73 +1223,49 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         if saved_min <= REROUTE_MIN_SAVED_MIN:
             continue
 
-        # 2. 替代路徑的 VD 覆蓋檢查與即時路況計算
-        valid_vds: List[Dict[str, Any]] = []
-        anomaly_vds: List[Dict[str, Any]] = []
-
-        for vd in vds:
-            try:
-                lat_v = float(vd["lat"])
-                lon_v = float(vd["lon"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            off, s_pos = _project_point_to_path(lat_v, lon_v, alt_path, alt_cum)
-            if off <= COVERAGE_THRESHOLD_M:
-                reading = _vd_path_reading(vd, alt_path, alt_cum, s_pos)
-                if reading is None:
-                    continue  # 對向偵測器，不屬於替代路行進方向
-                if not reading.get("speed_valid"):
-                    anomaly_vds.append({**vd, "anomaly_reason": reading.get("anomaly_reason")})
-                else:
-                    valid_vds.append({**vd, "speed": reading["speed"], "color": reading["color"],
-                                      "links": {}, "anomaly_reason": None})
-
-        # 只有在有「有效正常 VD」時才視為有效即時覆蓋；異常狀態直接視為類似無覆蓋（不參與時間膨脹）
-        has_vd_coverage = (len(valid_vds) > 0)
+        # 2. 即時省時：替代路上的偵測器覆蓋段改用偵測器車速（與主線同一套覆蓋規則）
+        alt_covs = _path_coverage(alt_prof, vds)
+        valid_covs = [c for c in alt_covs if c.get("speed")]
+        anomaly_covs = [c for c in alt_covs if not c.get("speed")]
+        has_vd_coverage = bool(valid_covs)
         rt_saved_min: Optional[float] = None
         rt_color = "GRAY"
         anomaly_tag = None
 
         if has_vd_coverage:
-            merged_alt = _vd_intervals_on_path(alt_path, alt_cum, valid_vds)
-            alt_rt_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
+            alt_rt_s = travel_time_s(alt_segs, coverage_intervals(valid_covs), 0.0, alt_total_m)
             rt_saved_min = (main_p1p2_s - alt_rt_s) / 60.0
-
-            # 顏色嚴重度僅依據有效正常 VD：RED > ORANGE > GREEN
-            has_red = any(v.get("color") == "RED" for v in valid_vds)
-            has_orange = any(v.get("color") == "ORANGE" for v in valid_vds)
-            has_green = any(v.get("color") == "GREEN" for v in valid_vds)
-            if has_red:
-                rt_color = "RED"
-            elif has_orange:
-                rt_color = "ORANGE"
-            elif has_green:
-                rt_color = "GREEN"
+            # 顏色嚴重度僅依據有效偵測器：RED > ORANGE > GREEN
+            for c_name in ("RED", "ORANGE", "GREEN"):
+                if any(c.get("color") == c_name for c in valid_covs):
+                    rt_color = c_name
+                    break
+        elif anomaly_covs:
+            # 只覆蓋到異常偵測器：標註原因（呈現類似無覆蓋之灰色狀態）
+            reasons = [str(c.get("anomaly_reason") or "") for c in anomaly_covs]
+            if any("車速" in r for r in reasons):
+                anomaly_tag = "車速異常"
+            elif any("無" in r for r in reasons):
+                anomaly_tag = "無資料"
+            elif any("設備" in r for r in reasons):
+                anomaly_tag = "設備異常"
             else:
-                rt_color = "GRAY"
-        else:
-            # 若無有效正常 VD，但有覆蓋到異常 VD，標註具體原因（呈現類似無覆蓋之灰色狀態）
-            if anomaly_vds:
-                reasons = [str(v.get("anomaly_reason") or "") for v in anomaly_vds]
-                if any("車速" in r for r in reasons):
-                    anomaly_tag = "車速異常"
-                elif any("無" in r for r in reasons):
-                    anomaly_tag = "無資料"
-                elif any("設備" in r for r in reasons):
-                    anomaly_tag = "設備異常"
-                else:
-                    anomaly_tag = "資料異常"
+                anomaly_tag = "資料異常"
 
         alts.append({
             "seg_polyline": alt_path,
+            # 替代路自身剖面（相對替代路起點的里程），套用改道時拼接回主線剖面
+            "seg_speed_segments": alt_segs,
+            "seg_road_segments": alt_prof["road_segments"],
+            "seg_turns": alt_prof["turn_boundaries"],
             "p1_m": round(p1, 1),
             "p2_m": round(p2, 1),
             "leg_start_m": round(leg_start, 1),
             "leg_end_m": round(leg_end, 1),
             "main_p1p2_min": round(main_p1p2_s / 60.0, 1),
             "base_p1p2_min": round(base_p1p2_s / 60.0, 1),
-            "alt_p1p2_min": round(alt_osrm_s / 60.0, 1),
-            "eta_min": round((main_total_s - main_p1p2_s + alt_osrm_s) / 60.0, 1),
+            "alt_p1p2_min": round(alt_est_s / 60.0, 1),
+            "eta_min": round((main_total_s - main_p1p2_s + alt_est_s) / 60.0, 1),
             "saved_min": round(saved_min, 1),
             "distance_km": round(alt_total_m / 1000.0, 2),
             "exit_at": exit_at,
@@ -1268,6 +1309,8 @@ class RouteAlternativesRequest(BaseModel):
     vds: List[RouteAltVd] = []
     counties: List[str] = []
     legs: List[RouteAltLeg] = []
+    speed_segments: List[List[float]] = []   # 主線基準速度剖面 [起m, 終m, m/s]
+    road_segments: List[List[Any]] = []
 
 
 def _are_routes_duplicate(alt_a: Dict[str, Any], alt_b: Dict[str, Any]) -> bool:
@@ -1461,22 +1504,30 @@ def route_alternatives(req: RouteAlternativesRequest):
 
         leg_events[li] = slots
 
-    merged_main = _vd_intervals_on_path(path, cum, vds)
+    # 主線基準速度剖面（路名速限）；舊前端未提供時，退回各 leg 平均速度
+    if req.speed_segments:
+        main_segs = _normalize_speed_segments(req.speed_segments, total_m)
+    else:
+        fb_segs: List[List[float]] = []
+        prev = 0.0
+        for i, end in enumerate(leg_bounds or [total_m]):
+            info = legs_info.get(i, {})
+            base_min = float(info.get("base_duration_min") or info.get("duration_min") or 0.0)
+            if end > prev:
+                fb_segs.append([prev, end, (end - prev) / (base_min * 60.0) if base_min > 0 else DEFAULT_BASE_SPEED_MPS])
+            prev = end
+        main_segs = _normalize_speed_segments(fb_segs, total_m)
+    # 主線偵測器覆蓋段（前端依行進方向/模擬推算的有效車速）
+    main_ivs = coverage_intervals(req.coverage)
+    main_total_s = sum(float(x.get("duration_min") or 0.0) * 60.0 for x in legs_info.values())
+    if main_total_s <= 0:
+        main_total_s = travel_time_s(main_segs, main_ivs, 0.0, total_m)
 
     out_legs: List[Dict[str, Any]] = []
     for li in sorted(leg_events.keys()):
         slots = leg_events[li]
-        leg_info = legs_info.get(li, {})
         leg_start = leg_bounds[li - 1] if 0 < li < len(leg_bounds) else 0.0
         leg_end = leg_bounds[li] if li < len(leg_bounds) else total_m
-
-        leg_base_min = float(leg_info.get("base_duration_min")
-                             or leg_info.get("duration_min") or 0.0)
-        leg_nom = ((leg_end - leg_start) / (leg_base_min * 60.0)) if leg_base_min > 0 else 15.0
-        main_total_s = sum(float(x.get("duration_min") or 0.0) * 60.0
-                           for x in legs_info.values())
-        if main_total_s <= 0:
-            main_total_s = total_m / max(leg_nom, 1.0)
 
         leg_items: List[Dict[str, Any]] = []
         for slot in slots:
@@ -1529,8 +1580,8 @@ def route_alternatives(req: RouteAlternativesRequest):
                 p2 = min(evt_end, max(_cand_p2(k), b))
                 if p2 - p1 < REROUTE_MIN_WINDOW_M:
                     continue
-                alts, stats = _reroute_candidates(path, cum, vds, merged_main, p1, p2,
-                                                  leg_start, leg_end, leg_nom, main_total_s)
+                alts, stats = _reroute_candidates(path, cum, main_segs, main_ivs, vds, p1, p2,
+                                                  leg_start, leg_end, main_total_s)
                 total_routes += int(stats.get("osrm_routes") or 0)
                 total_nonfake += int(stats.get("nonfake_alts") or 0)
                 stat_best = stats.get("best_nonfake_saved_min")
@@ -1608,45 +1659,94 @@ def detect_turn_boundaries(path: List[List[float]], cum: List[float], min_angle_
     return turns
 
 
+class RouteProfilePiece(BaseModel):
+    """拼接用路段：幾何 + 自身剖面（里程相對於該段起點）。"""
+    path: List[List[float]] = []
+    speed_segments: List[List[float]] = []
+    road_segments: List[List[Any]] = []
+    turn_boundaries: List[float] = []
+
+
 class RouteReprofileRequest(BaseModel):
-    polyline: List[List[float]] = []
+    polyline: List[List[float]] = []          # 舊格式：只有幾何（無剖面）
+    pieces: List[RouteProfilePiece] = []      # 新格式：原路前段 + 替代路 + 原路後段
     counties: List[str] = []
     leg_boundaries: List[float] = []
     stop_coordinates: List[List[float]] = []
 
 
+def _splice_pieces(pieces: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """依序拼接各段幾何與剖面；段與段的接合點視為轉彎點（截斷偵測器覆蓋）。"""
+    path: List[List[float]] = []
+    cum: List[float] = [0.0]
+    turns: List[float] = []
+    roads: List[List[Any]] = []
+    speeds: List[List[float]] = []
+    for k, pc in enumerate(pieces):
+        pts = [p for p in (pc.get("path") or []) if p and len(p) >= 2]
+        if not pts:
+            continue
+        offset = cum[-1] + (haversine_distance_meters(path[-1][0], path[-1][1], pts[0][0], pts[0][1]) if path else 0.0)
+        for pt in pts:
+            if path:
+                prev = path[-1]
+                if abs(prev[0] - pt[0]) < 1e-9 and abs(prev[1] - pt[1]) < 1e-9:
+                    continue
+                cum.append(cum[-1] + haversine_distance_meters(prev[0], prev[1], pt[0], pt[1]))
+            path.append([pt[0], pt[1]])
+        for a, b, v in (pc.get("speed_segments") or []):
+            speeds.append([float(a) + offset, float(b) + offset, float(v)])
+        for a, b, name in (pc.get("road_segments") or []):
+            roads.append([float(a) + offset, float(b) + offset, name])
+        turns.extend(float(t) + offset for t in (pc.get("turn_boundaries") or []))
+        if k > 0:
+            turns.append(offset)
+    total = cum[-1] if cum else 0.0
+    return {
+        "path": path,
+        "cum": cum,
+        "turn_boundaries": sorted({round(t, 1) for t in turns if 0.0 < t < total}),
+        "road_segments": roads,
+        "speed_segments": _normalize_speed_segments(speeds, total),
+    }
+
+
 @app.post("/api/route/reprofile")
 def route_reprofile(req: RouteReprofileRequest, force: bool = False):
-    """套用改道後，將拼接後的新路線幾何送回後端重新進行完整的路況與偵測器比對：
-    1. 計算新路線累積里程 cum
-    2. 自動幾何偵測路口轉彎點 turn_boundaries
-    3. 依據站點精確投影計算各 leg 終點里程 leg_boundaries
+    """套用改道後，將拼接後的新路線送回後端重新進行完整的路況與偵測器比對：
+    1. 拼接原路前段 + 替代路 + 原路後段的幾何與剖面（基準速度、路名、轉彎點）
+    2. 依站點順序投影計算各 leg 終點里程 leg_boundaries
+    3. 由新剖面重算各 leg 距離與基準時間
     4. 呼叫 compute_vd_overlay 重新投影偵測器，替代路上的 VD 正式標記為 on_route: true
-    5. 產出新路徑專屬的覆蓋色帶 vd_coverage，原主線舊色帶自動消除
     """
-    path = req.polyline or []
-    if len(path) < 2:
-        return {"status": "error", "message": "Polyline too short"}
+    if req.pieces:
+        pieces = [pc.model_dump() if hasattr(pc, "model_dump") else pc.dict() for pc in req.pieces]
+        prof = _splice_pieces(pieces)
+        path, cum = prof["path"], prof["cum"]
+        if len(path) < 2:
+            return {"status": "error", "message": "Polyline too short"}
+        turns = prof["turn_boundaries"]
+    else:
+        path = req.polyline or []
+        if len(path) < 2:
+            return {"status": "error", "message": "Polyline too short"}
+        cum = [0.0]
+        for i in range(1, len(path)):
+            cum.append(cum[-1] + haversine_distance_meters(
+                path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]))
+        turns = detect_turn_boundaries(path, cum)
+        prof = {"road_segments": [], "speed_segments": _normalize_speed_segments([], cum[-1])}
 
-    cum = [0.0]
-    for i in range(1, len(path)):
-        cum.append(cum[-1] + haversine_distance_meters(
-            path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]))
-
-    # 1. 自動幾何偵測路口轉彎點 (供後續改道與覆蓋截斷使用)
-    turns = detect_turn_boundaries(path, cum)
-
-    # 2. 精確計算各 leg 的終點里程 (leg_boundaries)
+    # 各 leg 終點：依站點順序投影（只往前找），最後一站固定為路線終點
     if req.stop_coordinates and len(req.stop_coordinates) > 1:
-        calc_legs: List[float] = []
+        leg_bounds: List[float] = []
+        prev = 0.0
         for coord in req.stop_coordinates[1:]:
-            _, s = _project_point_to_path(coord[0], coord[1], path, cum)
-            calc_legs.append(round(s, 1))
-        if calc_legs:
-            calc_legs[-1] = cum[-1]
-            leg_bounds = calc_legs
-        else:
-            leg_bounds = req.leg_boundaries if req.leg_boundaries else [cum[-1]]
+            _, s = _project_point_to_path(coord[0], coord[1], path, cum, min_s=prev)
+            s = max(s, prev)
+            leg_bounds.append(round(s, 1))
+            prev = s
+        leg_bounds[-1] = cum[-1]
     else:
         leg_bounds = req.leg_boundaries if req.leg_boundaries else [cum[-1]]
 
@@ -1655,8 +1755,19 @@ def route_reprofile(req: RouteReprofileRequest, force: bool = False):
         "cum": cum,
         "turn_boundaries": turns,
         "leg_boundaries": leg_bounds,
-        "road_segments": []
+        "road_segments": prof["road_segments"],
+        "speed_segments": prof["speed_segments"],
     }
+
+    legs_out = []
+    prev = 0.0
+    for i, end in enumerate(leg_bounds):
+        legs_out.append({
+            "leg_index": i,
+            "distance_km": round(max(0.0, end - prev) / 1000.0, 2),
+            "base_duration_min": round(base_time_s(profile["speed_segments"], prev, end) / 60.0, 1),
+        })
+        prev = end
 
     try:
         vd_points, vd_coverage = compute_vd_overlay(profile, req.counties, force_live=force)
@@ -1668,12 +1779,15 @@ def route_reprofile(req: RouteReprofileRequest, force: bool = False):
         "status": "success",
         "polyline": path,
         "counties": req.counties,
+        "legs": legs_out,
         "vd_points": vd_points,
         "vd_coverage": vd_coverage,
         "route_meta": {
             "cum": cum,
             "turn_boundaries": turns,
-            "leg_boundaries": leg_bounds
+            "leg_boundaries": leg_bounds,
+            "road_segments": profile["road_segments"],
+            "speed_segments": profile["speed_segments"],
         }
     }
 
