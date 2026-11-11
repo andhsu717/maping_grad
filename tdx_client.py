@@ -52,10 +52,17 @@ CONGESTION_TTL_SEC = 6 * 3600
 
 # 公路局 fallback 門檻（無官方逐路段定義時使用，單位 km/h）
 FALLBACK_LEVEL_SPEED = [(40.0, 1), (20.0, 3), (0.0, 5)]
+# 各等級代表速度（無官方門檻時；模擬壅塞用）
+FALLBACK_REP_SPEED = {1: 45.0, 2: 37.0, 3: 30.0, 4: 23.0, 5: 10.0}
 
-# 車速合理範圍（km/h）：低於 8.0 km/h 或大於 150 km/h 視為偵測器異常，改採預設綠色標準
-SPEED_VALID_MIN = 8.0
+# 車速上限（km/h）：大於此值視為偵測器異常；車速 0 的車道視為無資料、不納入平均
 SPEED_VALID_MAX = 150.0
+
+# TDX 方位字串 → 角度（0=北，順時針）
+BEARING_DEG = {"N": 0.0, "NE": 45.0, "E": 90.0, "SE": 135.0,
+               "S": 180.0, "SW": 225.0, "W": 270.0, "NW": 315.0}
+SAME_DIRECTION_MAX_DEG = 67.5   # 與路線前進方向夾角在此內視為同方向
+NEAREST_DIRECTION_MAX_DEG = 90.0  # 無同方向時，取最接近且小於此角度者
 
 
 def _load_credentials() -> Tuple[Optional[str], Optional[str]]:
@@ -180,24 +187,159 @@ def detect_counties(addresses: List[str]) -> List[str]:
     return codes
 
 
-def extract_speed(vd_live: Dict[str, Any]) -> float:
-    """由一筆 VDLive 取代表速度：回報中所有車道（Speed>0）的平均；無資料回 0。"""
-    speeds: List[float] = []
-    for flow in vd_live.get("LinkFlows", []) or []:
-        for lane in flow.get("Lanes", []) or []:
-            spd = lane.get("Speed")
-            if isinstance(spd, (int, float)) and spd > 0:
-                speeds.append(float(spd))
-    if not speeds:
-        return 0.0
-    return round(sum(speeds) / len(speeds), 1)
+def _flow_lane_speeds(flow: Dict[str, Any]) -> List[float]:
+    """單一方向 (LinkFlow) 各車道車速；車速 0 的車道（無車或診斷值）不納入。"""
+    out: List[float] = []
+    for lane in flow.get("Lanes", []) or []:
+        spd = lane.get("Speed")
+        if isinstance(spd, (int, float)) and spd > 0:
+            out.append(float(spd))
+    return out
 
 
 def is_speed_valid(speed: Optional[float]) -> bool:
-    """車速是否落在合理範圍（0.5~150 km/h）。超出視為偵測器異常。"""
+    """車速是否落在合理範圍（> 0 且 ≤ 150 km/h）。超出視為偵測器異常。"""
     if not isinstance(speed, (int, float)):
         return False
-    return SPEED_VALID_MIN <= float(speed) <= SPEED_VALID_MAX
+    return 0.0 < float(speed) <= SPEED_VALID_MAX
+
+
+def static_links(vd: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """由靜態設備清單建立 {LinkID: {bearing, lanes, levels}}（尚無即時車道資料）。"""
+    out: Dict[str, Dict[str, Any]] = {}
+    for dl in (vd.get("DetectionLinks") or []):
+        lid = dl.get("LinkID")
+        if lid:
+            out[lid] = {
+                "bearing": str(dl.get("Bearing") or dl.get("RoadDirection") or "").upper(),
+                "lanes": [],
+                "levels": None,
+            }
+    return out
+
+
+def empty_entry(vd: Dict[str, Any]) -> Dict[str, Any]:
+    """無即時資料的偵測器：保留方向資訊，讀值為「無資料」。"""
+    base = {"status": None, "collect_time": None, "links": static_links(vd), "vd_levels": None}
+    base.update(summary_reading(base))
+    return base
+
+
+def _angle_diff(a: float, b: float) -> float:
+    d = abs(a - b) % 360.0
+    return 360.0 - d if d > 180.0 else d
+
+
+def links_for_heading(links: Dict[str, Dict[str, Any]], heading: Optional[float]) -> Optional[List[str]]:
+    """依路線前進方位角挑出同方向的 LinkID。
+
+    - 回傳 list：要納入計算的 LinkID（同方向的視為同一條道路）
+    - 回傳 None：偵測器只量測對向，不屬於此行進方向
+    - 無方位資訊或無法判斷時，回傳全部 LinkID（沿用舊行為）
+    """
+    ids = list((links or {}).keys())
+    if not ids or heading is None:
+        return ids
+    diffs: Dict[str, float] = {}
+    for lid in ids:
+        deg = BEARING_DEG.get(str((links[lid] or {}).get("bearing") or "").upper())
+        if deg is not None:
+            diffs[lid] = _angle_diff(deg, float(heading))
+    if not diffs:
+        return ids
+    same = [lid for lid, d in diffs.items() if d <= SAME_DIRECTION_MAX_DEG]
+    if same:
+        return same
+    best = min(diffs.values())
+    if best < NEAREST_DIRECTION_MAX_DEG:
+        return [lid for lid, d in diffs.items() if d == best]
+    return None
+
+
+def rep_speed_for_level(levels: Optional[List[Dict[str, Any]]], level: int) -> float:
+    """壅塞等級的代表速度：官方門檻區間中點；無門檻時用預設代表速度。"""
+    for lv in (levels or []):
+        try:
+            if int(lv.get("Level", -1)) != int(level):
+                continue
+        except (TypeError, ValueError):
+            continue
+        lo = lv.get("LowValue")
+        lo = float(lo) if isinstance(lo, (int, float)) else 0.0
+        top = lv.get("TopValue")
+        top = float(top) if isinstance(top, (int, float)) else lo + 12.0
+        return round((lo + top) / 2.0)
+    return FALLBACK_REP_SPEED.get(int(level), 0.0)
+
+
+def direction_reading(entry: Optional[Dict[str, Any]], link_ids: Optional[List[str]] = None,
+                      sim_level: Optional[int] = None) -> Dict[str, Any]:
+    """偵測器在指定方向 (link_ids) 的讀值：同方向所有車道（車速 > 0）簡單平均。
+
+    link_ids 為空時使用全部方向。sim_level 為模擬壅塞等級（即時優先，模擬只能加重）。
+    回傳 {speed, level, level_name, color, levels, speed_valid, anomaly_reason, manual}。
+    """
+    entry = entry or {}
+    links = entry.get("links") or {}
+    ids = [lid for lid in (link_ids if link_ids else list(links.keys())) if lid in links]
+    levels = None
+    for lid in ids:
+        if links[lid].get("levels"):
+            levels = links[lid]["levels"]
+            break
+    if levels is None:
+        levels = entry.get("vd_levels")
+
+    speed: Optional[float] = None
+    level: Optional[int] = None
+    anomaly: Optional[str] = None
+    status = entry.get("status")
+    if not entry:
+        anomaly = "無資料"
+    elif status not in (None, 0, "0"):
+        anomaly = "設備異常"
+    else:
+        lanes = [s for lid in ids for s in (links[lid].get("lanes") or [])]
+        if not lanes:
+            anomaly = "無資料"
+        else:
+            speed = round(sum(lanes) / len(lanes), 1)
+            if not is_speed_valid(speed):
+                anomaly = "車速異常"
+                speed = None
+            else:
+                level = classify_congestion(speed, levels)
+
+    manual = False
+    if sim_level:
+        sim = int(sim_level)
+        if level is None or sim > level:
+            level = sim
+            speed = rep_speed_for_level(levels, sim)
+            manual = True
+            anomaly = None
+    return {
+        "speed": speed,
+        "level": level,
+        "level_name": level_name(levels, level),
+        "color": level_color(level),
+        "levels": levels,
+        "speed_valid": speed is not None and speed > 0,
+        "anomaly_reason": anomaly,
+        "manual": manual,
+    }
+
+
+def summary_reading(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """不分路線方向時的代表讀值：取各方向中較慢（等級較嚴重）者。"""
+    best: Optional[Dict[str, Any]] = None
+    for lid in (entry.get("links") or {}):
+        r = direction_reading(entry, [lid])
+        if not r["speed_valid"]:
+            continue
+        if best is None or ((r["level"] or 0), -(r["speed"] or 0)) > ((best["level"] or 0), -(best["speed"] or 0)):
+            best = r
+    return best if best is not None else direction_reading(entry, None)
 
 
 def get_congestion_levels(city: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -307,72 +449,57 @@ def level_name(levels: Optional[List[Dict[str, Any]]], level: Optional[int]) -> 
     return ""
 
 
-def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str, Any]]:
-    """回傳 {VDID: {speed, status, collect_time, speed_valid, level, level_name, color, levels}}。
+def _link_levels(lid: str, by_clid: Dict[str, List[Dict[str, Any]]],
+                 link2clid: Optional[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    if lid in by_clid:
+        return by_clid[lid]
+    if link2clid and lid in link2clid:
+        return by_clid.get(link2clid[lid])
+    return None
 
+
+def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str, Any]]:
+    """回傳 {VDID: {status, collect_time, links, vd_levels, + 代表讀值}}。
+
+    links = {LinkID: {bearing, lanes:[各車道車速>0], levels}}：依方向分開，供路線依行進方向取值。
+    代表讀值（speed/level/color/...）為「各方向中較慢者」，僅供不在路線上的偵測器顯示。
     force_live=True 時跳過即時資料快取（速度/路段），每次皆重新向 TDX 取號誌；
     靜態設備清單與壅塞門檻定義仍走長快取。
-    車速不合理（<8.0 或 >150 km/h）視為偵測器異常 → 歸類為 GREEN（level 1），並標註異常。
     """
     result: Dict[str, Dict[str, Any]] = {}
     for city in cities:
         by_clid = get_congestion_levels(city)
         link2clid: Optional[Dict[str, Any]] = None
-        levels_by_vdid: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+        static_by_vdid: Dict[str, Dict[str, Any]] = {}
         for vd in get_city_vds(city):
             vdid = str(vd.get("VDID", ""))
             if not vdid:
                 continue
             if link2clid is None and not any(lid in by_clid for lid in _vd_links(vd)):
                 link2clid = get_link_to_clid(city, force_live=force_live)
-            levels_by_vdid[vdid] = _resolve_levels(vd, by_clid, link2clid)
+            static_by_vdid[vdid] = vd
         for entry in get_city_vd_live(city, use_cache=not force_live):
             vdid = str(entry.get("VDID", ""))
             if not vdid:
                 continue
-            speed = extract_speed(entry)
-            status = entry.get("Status")
-            levels = levels_by_vdid.get(vdid)
-            anomaly_reason = None
-
-            # 取得該路段等級 1 (A級綠色) 代表速作為預設速度，若無則預設 50.0 km/h
-            green_speed = 50.0
-            if levels:
-                for lv in levels:
-                    if lv.get("Level") == 1:
-                        lo = float(lv.get("LowValue") or 0.0)
-                        top = float(lv.get("TopValue") or (lo + 20.0))
-                        green_speed = round((lo + top) / 2.0, 1)
-                        break
-
-            if status not in (None, 0):
-                # 設備異常：類似無覆蓋（灰色無效，不參與計算）
-                color, level, speed_valid = "GRAY", None, False
-                anomaly_reason = "設備異常"
-                speed = None
-            elif speed is None:
-                # 無資料：類似無覆蓋（灰色無效，不參與計算）
-                color, level, speed_valid = "GRAY", None, False
-                anomaly_reason = "無資料"
-                speed = None
-            elif not is_speed_valid(speed):
-                # 車速異常（低於下限 8km/h 或高於上限 150km/h）：類似無覆蓋（灰色無效，不參與計算）
-                color, level, speed_valid = "GRAY", None, False
-                anomaly_reason = "車速異常"
-                speed = None
-            else:
-                level = classify_congestion(speed, levels)
-                color = level_color(level)
-                speed_valid = True
-            result[vdid] = {
-                "speed": speed,
-                "status": status,
+            vd = static_by_vdid.get(vdid) or {}
+            vd_levels = _resolve_levels(vd, by_clid, link2clid) if vd else None
+            links = static_links(vd)
+            for flow in (entry.get("LinkFlows") or []):
+                lid = flow.get("LinkID")
+                if not lid:
+                    continue
+                if lid not in links:
+                    links[lid] = {"bearing": "", "lanes": [], "levels": None}
+                links[lid]["lanes"] = _flow_lane_speeds(flow)
+            for lid, info in links.items():
+                info["levels"] = _link_levels(lid, by_clid, link2clid) or vd_levels
+            base = {
+                "status": entry.get("Status"),
                 "collect_time": entry.get("DataCollectTime"),
-                "speed_valid": speed_valid,
-                "anomaly_reason": anomaly_reason,
-                "level": level,
-                "level_name": level_name(levels, level),
-                "color": color,
-                "levels": levels,
+                "links": links,
+                "vd_levels": vd_levels,
             }
+            base.update(summary_reading(base))
+            result[vdid] = base
     return result

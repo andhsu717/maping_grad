@@ -245,16 +245,24 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
             lat = float(lat); lon = float(lon)
             off, s = _project_point_to_path(lat, lon, path, cum)
 
-            entry = live.get(vdid)
-            speed = entry.get("speed") if entry else None
-            color = entry.get("color") if entry else "GRAY"
-            level = entry.get("level") if entry else None
-            level_label = entry.get("level_name") if entry else ""
-            levels = entry.get("levels") if entry else None
+            entry = live.get(vdid) or tdx_client.empty_entry(vd)
             on_route = off <= COVERAGE_THRESHOLD_M
             # 路名比對：距離合格後再比街名，防止陸橋路線吃到下方道路的 VD
             if on_route and road_segs:
                 on_route = _road_name_compatible(vd.get("RoadName", ""), _road_name_at(road_segs, s))
+            # 行進方向比對：只取與路線同方向的車道；僅量測對向的偵測器不算在路線上
+            dir_links: Optional[List[str]] = None
+            dir_mismatch = False
+            if on_route:
+                dir_links = tdx_client.links_for_heading(entry.get("links") or {}, _bearing_at(path, cum, s))
+                if dir_links is None:
+                    on_route = False
+                    dir_mismatch = True
+            reading = tdx_client.direction_reading(entry, dir_links) if on_route else entry
+            speed = reading.get("speed")
+            color = reading.get("color") or "GRAY"
+            level = reading.get("level")
+            levels = reading.get("levels")
 
             points.append({
                 "vdid": vdid,
@@ -263,14 +271,18 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
                 "road": vd.get("RoadName", ""),
                 "road_class": vd.get("RoadClass"),
                 "speed": speed,
-                "speed_valid": entry.get("speed_valid") if entry else False,
-                "anomaly_reason": entry.get("anomaly_reason") if entry else None,
+                "speed_valid": bool(reading.get("speed_valid")),
+                "anomaly_reason": reading.get("anomaly_reason"),
                 "color": color,
                 "level": level,
-                "level_name": level_label,
+                "level_name": reading.get("level_name") or "",
                 "levels": levels,
-                "status": entry.get("status") if entry else None,
-                "collect_time": entry.get("collect_time") if entry else None,
+                "vd_levels": entry.get("vd_levels"),
+                "links": entry.get("links") or {},
+                "dir_links": dir_links or [],
+                "dir_mismatch": dir_mismatch,
+                "status": entry.get("status"),
+                "collect_time": entry.get("collect_time"),
                 "on_route": on_route,
             })
 
@@ -298,11 +310,12 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
                 "path": seg,
                 "back_m": round(back_len, 1),
                 "fwd_m": round(fwd_len, 1),
+                "dir_links": dir_links or [],
                 "color": color,
                 "level": level,
                 "levels": levels,
                 "speed": speed,
-                "collect_time": entry.get("collect_time") if entry else None,
+                "collect_time": entry.get("collect_time"),
             })
     return points, coverage
 
@@ -741,18 +754,40 @@ REROUTE_SCOPE_STEP_M = 200.0   # 轉彎稀疏時的固定擴展步進 (公尺)
 REROUTE_CLUSTER_GAP_M = 200.0  # 同 leg 壅塞區間間隔 ≥ 此值才拆成不同事件
 
 
+def _vd_path_reading(vd: Dict[str, Any], path: List[List[float]], cum: List[float],
+                     s: float) -> Optional[Dict[str, Any]]:
+    """前端傳入的 VD 在某路徑里程 s 處、依該路徑行進方向的讀值；對向偵測器回傳 None。"""
+    links = vd.get("links") or {}
+    if not links:
+        # 無方向資訊（舊資料）：沿用前端傳入的有效速度
+        spd = vd.get("speed")
+        valid = isinstance(spd, (int, float)) and spd > 0 and not vd.get("anomaly_reason")
+        return {
+            "speed": float(spd) if valid else None,
+            "speed_valid": bool(valid),
+            "color": vd.get("color") or "GRAY",
+            "anomaly_reason": vd.get("anomaly_reason") or (None if valid else "無資料"),
+        }
+    ids = tdx_client.links_for_heading(links, _bearing_at(path, cum, s))
+    if ids is None:
+        return None
+    entry = {"status": vd.get("status"), "links": links, "vd_levels": vd.get("vd_levels")}
+    return tdx_client.direction_reading(entry, ids, vd.get("sim_level"))
+
+
 def _vd_intervals_on_path(path: List[List[float]], cum: List[float],
                           vds: List[Dict[str, Any]]) -> List[List[float]]:
     """將 VD 投影到路徑，回傳合併後的覆蓋區間 [[a_m, b_m, speed_kmh], ...]。"""
     intervals: List[List[float]] = []
     total = cum[-1]
     for vd in vds:
-        spd = vd.get("speed")
-        if spd is None or float(spd) <= 0:
-            continue
         off, s = _project_point_to_path(float(vd["lat"]), float(vd["lon"]), path, cum)
         if off > COVERAGE_THRESHOLD_M:
             continue
+        reading = _vd_path_reading(vd, path, cum, s)
+        if not reading or not reading.get("speed_valid"):
+            continue
+        spd = reading["speed"]
         a = max(0.0, s - EXTEND_M)
         b = min(total, s + EXTEND_M)
         if b > a:
@@ -1135,12 +1170,14 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
                 continue
             off, s_pos = _project_point_to_path(lat_v, lon_v, alt_path, alt_cum)
             if off <= COVERAGE_THRESHOLD_M:
-                spd = vd.get("speed")
-                is_anomaly = bool(vd.get("anomaly_reason")) or (vd.get("status") not in (None, 0)) or (vd.get("color") == "GRAY")
-                if is_anomaly or spd is None or float(spd) <= 0:
-                    anomaly_vds.append(vd)
+                reading = _vd_path_reading(vd, alt_path, alt_cum, s_pos)
+                if reading is None:
+                    continue  # 對向偵測器，不屬於替代路行進方向
+                if not reading.get("speed_valid"):
+                    anomaly_vds.append({**vd, "anomaly_reason": reading.get("anomaly_reason")})
                 else:
-                    valid_vds.append(vd)
+                    valid_vds.append({**vd, "speed": reading["speed"], "color": reading["color"],
+                                      "links": {}, "anomaly_reason": None})
 
         # 只有在有「有效正常 VD」時才視為有效即時覆蓋；異常狀態直接視為類似無覆蓋（不參與時間膨脹）
         has_vd_coverage = (len(valid_vds) > 0)
@@ -1205,10 +1242,14 @@ class RouteAltVd(BaseModel):
     vdid: str = ""
     lat: float
     lon: float
+    road: Optional[str] = ""
     speed: Optional[float] = None
     color: Optional[str] = "GRAY"
     anomaly_reason: Optional[str] = None
     status: Optional[Any] = None
+    links: Dict[str, Any] = {}          # {LinkID: {bearing, lanes, levels}}，依方向取值用
+    vd_levels: Optional[List[Dict[str, Any]]] = None
+    sim_level: Optional[int] = None     # 前端模擬壅塞等級
 
 
 class RouteAltLeg(BaseModel):
