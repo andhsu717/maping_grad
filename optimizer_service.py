@@ -888,6 +888,27 @@ def get_via_point(p1: List[float], p2: List[float],
     return [offset_lat, offset_lon]
 
 
+def _bearing_at(path: List[List[float]], cum: List[float], s: float) -> Optional[float]:
+    """計算主線路徑在累積里程 s 處的前進方向角 (0~360度，正北為0，順時針)。"""
+    if len(path) < 2 or len(cum) < 2:
+        return None
+    p_curr = _path_point_at(path, cum, max(0.0, s))
+    p_next = _path_point_at(path, cum, min(cum[-1], s + 25.0))
+    lat1, lon1 = p_curr
+    lat2, lon2 = p_next
+    if abs(lat2 - lat1) < 1e-6 and abs(lon2 - lon1) < 1e-6:
+        p_prev = _path_point_at(path, cum, max(0.0, s - 25.0))
+        lat1, lon1 = p_prev
+        lat2, lon2 = p_curr
+    if abs(lat2 - lat1) < 1e-6 and abs(lon2 - lon1) < 1e-6:
+        return None
+    y = math.sin(math.radians(lon2 - lon1)) * math.cos(math.radians(lat2))
+    x = (math.cos(math.radians(lat1)) * math.sin(math.radians(lat2)) -
+         math.sin(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.cos(math.radians(lon2 - lon1)))
+    bearing = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+    return round(bearing, 1)
+
+
 def _has_uturn(route: Dict[str, Any]) -> bool:
     """檢查 route 中的 maneuvers 是否包含迴轉 (U-turn) 動作，防止走進死巷調頭。"""
     for leg in route.get("legs", []) or []:
@@ -913,23 +934,35 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
     }
     pt1 = _path_point_at(path, cum, p1)
     pt2 = _path_point_at(path, cum, p2)
+    b1 = _bearing_at(path, cum, p1)
 
     raw_routes: List[Dict[str, Any]] = []
 
-    # 策略 1：嘗試 exclude=motorway（高架/國道壅塞時自動引導下交流道走平面）
+    # 策略 1：嘗試 exclude=motorway（高架/國道壅塞時自動引導下交流道走平面，強制 continue_straight 與起點順向方位）
     try:
+        bearing_arg = f"&bearings={b1:.0f},60;" if b1 is not None else ""
         url_ex = (f"{OSRM_BASE_URL}/route/v1/driving/"
                   f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-                  f"?overview=full&geometries=geojson&steps=true&exclude=motorway")
+                  f"?overview=full&geometries=geojson&steps=true&continue_straight=true&exclude=motorway{bearing_arg}")
         resp_ex = requests.get(url_ex, headers=HEADERS, timeout=6)
         if resp_ex.status_code == 200:
             routes_ex = resp_ex.json().get("routes", [])
             if routes_ex:
                 raw_routes.append(routes_ex[0])
+        elif bearing_arg:
+            # Bearing 嚴格匹配若無路徑，降級為不帶 bearing 重新索取
+            url_ex_fb = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                         f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                         f"?overview=full&geometries=geojson&steps=true&continue_straight=true&exclude=motorway")
+            resp_ex_fb = requests.get(url_ex_fb, headers=HEADERS, timeout=6)
+            if resp_ex_fb.status_code == 200:
+                routes_ex = resp_ex_fb.json().get("routes", [])
+                if routes_ex:
+                    raw_routes.append(routes_ex[0])
     except Exception:
         pass
 
-    # 策略 2：市區側向避開點 P_via（向右與向左側推 600m，強制繞行，且強制 continue_straight=true 防迴轉）
+    # 策略 2：市區側向避開點 P_via（向右與向左側推 600m，強制繞行，且強制 continue_straight=true 防迴轉掉頭）
     for side in ("right", "left"):
         via_pt = get_via_point(pt1, pt2, offset_meters=600.0, side=side)
         d_v1 = haversine_distance_meters(pt1[0], pt1[1], via_pt[0], via_pt[1])
@@ -937,14 +970,25 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         if d_v1 < 30.0 or d_v2 < 30.0:
             continue
         try:
+            bearing_arg = f"&bearings={b1:.0f},60;;" if b1 is not None else ""
             url_via = (f"{OSRM_BASE_URL}/route/v1/driving/"
                        f"{pt1[1]:.6f},{pt1[0]:.6f};{via_pt[1]:.6f},{via_pt[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-                       f"?overview=full&geometries=geojson&steps=true")
+                       f"?overview=full&geometries=geojson&steps=true&continue_straight=true{bearing_arg}")
             resp_via = requests.get(url_via, headers=HEADERS, timeout=6)
             if resp_via.status_code == 200:
                 routes_via = resp_via.json().get("routes", [])
                 if routes_via:
                     raw_routes.append(routes_via[0])
+            elif bearing_arg:
+                # Bearing 嚴格匹配若無路徑，降級為不帶 bearing 重新索取（維持 continue_straight=true）
+                url_via_fb = (f"{OSRM_BASE_URL}/route/v1/driving/"
+                             f"{pt1[1]:.6f},{pt1[0]:.6f};{via_pt[1]:.6f},{via_pt[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
+                             f"?overview=full&geometries=geojson&steps=true&continue_straight=true")
+                resp_via_fb = requests.get(url_via_fb, headers=HEADERS, timeout=6)
+                if resp_via_fb.status_code == 200:
+                    routes_via = resp_via_fb.json().get("routes", [])
+                    if routes_via:
+                        raw_routes.append(routes_via[0])
         except Exception:
             pass
 
@@ -953,7 +997,7 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
         try:
             url_alt = (f"{OSRM_BASE_URL}/route/v1/driving/"
                        f"{pt1[1]:.6f},{pt1[0]:.6f};{pt2[1]:.6f},{pt2[0]:.6f}"
-                       f"?alternatives=2&overview=full&geometries=geojson&steps=true")
+                       f"?alternatives=2&overview=full&geometries=geojson&steps=true&continue_straight=true")
             resp_alt = requests.get(url_alt, headers=HEADERS, timeout=6)
             if resp_alt.status_code == 200:
                 raw_routes = resp_alt.json().get("routes", [])
