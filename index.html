@@ -801,6 +801,10 @@
         map.getPane('vdCoveragePane').style.zIndex = 450;
         map.createPane('stopMarkerPane');
         map.getPane('stopMarkerPane').style.zIndex = 460;
+        // 改道方向箭頭：在改道虛線（400）之上、改道資訊標籤與站點（≥ 460）之下，避免蓋住標籤
+        map.createPane('rerouteArrowPane');
+        map.getPane('rerouteArrowPane').style.zIndex = 420;
+        map.getPane('rerouteArrowPane').style.pointerEvents = 'none';
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '&copy; OpenStreetMap contributors'
@@ -856,17 +860,25 @@
                         if (total <= 0) return;
                         const mPerPx = 40075016.686 * Math.cos(pts[0][0] * Math.PI / 180) / Math.pow(2, zoom + 8);
                         const spacing = Math.max(total / REROUTE_ARROW_MAX, REROUTE_ARROW_SPACING_PX * mPerPx);
+                        // 避開改道資訊標籤（錨在虛線中點，往右下展開）與改道點／回歸點圓圈
+                        const badgePx = map.latLngToLayerPoint(pts[Math.floor(pts.length / 2)]);
+                        const dotPx = [alt.exit_at, alt.rejoin_at]
+                            .filter(q => q && q.length >= 2).map(q => map.latLngToLayerPoint(q));
                         for (let d = spacing / 2; d < total; d += spacing) {
                             const p = pathPointAt(pts, cum, d);
                             const q0 = pathPointAt(pts, cum, Math.max(0, d - 5));
                             const q1 = pathPointAt(pts, cum, Math.min(total, d + 5));
                             if (!p || !q0 || !q1) continue;
+                            const pp = map.latLngToLayerPoint(p);
+                            const dx = pp.x - badgePx.x, dy = pp.y - badgePx.y;
+                            if (dx > -20 && dx < 170 && dy > -20 && dy < 80) continue;
+                            if (dotPx.some(q => Math.hypot(pp.x - q.x, pp.y - q.y) < 18)) continue;
                             const brg = bearingDegJs(q0, q1);
                             const html = `<div class="reroute-arrow" style="transform: rotate(${brg.toFixed(0)}deg);">`
                                 + '<svg viewBox="0 0 14 14" width="14" height="14"><path d="M7 1 L12.5 11 L7 8.2 L1.5 11 Z" fill="#111111" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"/></svg></div>';
                             L.marker(p, {
                                 icon: L.divIcon({ className: 'reroute-arrow-icon', html, iconSize: [14, 14], iconAnchor: [7, 7] }),
-                                interactive: false, keyboard: false
+                                pane: 'rerouteArrowPane', interactive: false, keyboard: false
                             }).addTo(rerouteArrowLayer);
                         }
                     });
