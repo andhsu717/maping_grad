@@ -1118,6 +1118,110 @@ class RouteAlternativesRequest(BaseModel):
     legs: List[RouteAltLeg] = []
 
 
+def _are_routes_duplicate(alt_a: Dict[str, Any], alt_b: Dict[str, Any]) -> bool:
+    """比對兩條備選路線是否為實質相同的替代道路且節省時間相近。"""
+    # 1. 時間節省比對：預估節省時間差異若超過 0.5 分鐘，視為不同改道策略
+    s_a = float(alt_a.get("saved_min") or 0.0)
+    s_b = float(alt_b.get("saved_min") or 0.0)
+    if abs(s_a - s_b) > 0.5:
+        return False
+
+    # 若兩者都有即時省時，比對即時省時差異
+    rt_a = alt_a.get("realtime_saved_min")
+    rt_b = alt_b.get("realtime_saved_min")
+    if rt_a is not None and rt_b is not None:
+        if abs(float(rt_a) - float(rt_b)) > 0.5:
+            return False
+
+    # 2. 距離長度比對：總里程差異超過 20% 視為不同路線
+    d_a = float(alt_a.get("distance_km") or 0.0)
+    d_b = float(alt_b.get("distance_km") or 0.0)
+    if d_a > 0 and d_b > 0 and abs(d_a - d_b) / max(d_a, d_b) > 0.20:
+        return False
+
+    # 3. 幾何道路比對：比對中間取樣點與起迄點
+    poly_a = alt_a.get("seg_polyline") or []
+    poly_b = alt_b.get("seg_polyline") or []
+    if len(poly_a) < 2 or len(poly_b) < 2:
+        p1_a, p2_a = float(alt_a.get("p1_m") or 0.0), float(alt_a.get("p2_m") or 0.0)
+        p1_b, p2_b = float(alt_b.get("p1_m") or 0.0), float(alt_b.get("p2_m") or 0.0)
+        return abs(p1_a - p1_b) < 100.0 and abs(p2_a - p2_b) < 100.0
+
+    # 取中間點經緯度比對距離
+    mid_a = poly_a[len(poly_a) // 2]
+    mid_b = poly_b[len(poly_b) // 2]
+    dist_mid = haversine_distance_meters(mid_a[0], mid_a[1], mid_b[0], mid_b[1])
+    if dist_mid > 70.0:
+        return False
+
+    # 起點與終點距離比對（改道切出點與切回點距離）
+    dist_start = haversine_distance_meters(poly_a[0][0], poly_a[0][1], poly_b[0][0], poly_b[0][1])
+    dist_end = haversine_distance_meters(poly_a[-1][0], poly_a[-1][1], poly_b[-1][0], poly_b[-1][1])
+    if dist_start > 150.0 or dist_end > 150.0:
+        return False
+
+    return True
+
+
+def _deduplicate_leg_reroutes(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """在同一個 Leg 內，比對道路與時間節省，合併減少重複的改道事件。"""
+    can_events = [e for e in events if e.get("state") == "CAN_REROUTE"]
+    other_events = [e for e in events if e.get("state") != "CAN_REROUTE"]
+    if len(can_events) <= 1:
+        return events
+
+    merged_can: List[Dict[str, Any]] = []
+    for cur in can_events:
+        cur_best = (cur.get("alternatives") or [{}])[0]
+        duplicate_target = None
+        for existing in merged_can:
+            exist_best = (existing.get("alternatives") or [{}])[0]
+            if _are_routes_duplicate(cur_best, exist_best):
+                duplicate_target = existing
+                break
+
+        if duplicate_target is None:
+            merged_can.append(cur)
+        else:
+            # 發生重複：優先保留 COMBINED 事件；若同類型則保留省時更長或涵蓋範圍更廣者
+            target_best = (duplicate_target.get("alternatives") or [{}])[0]
+            cur_is_comb = cur.get("event_type") == "COMBINED"
+            tgt_is_comb = duplicate_target.get("event_type") == "COMBINED"
+
+            should_replace = False
+            if cur_is_comb and not tgt_is_comb:
+                should_replace = True
+            elif cur_is_comb == tgt_is_comb:
+                cur_save = cur_best.get("realtime_saved_min") if cur_best.get("realtime_saved_min") is not None else cur_best.get("saved_min", 0.0)
+                tgt_save = target_best.get("realtime_saved_min") if target_best.get("realtime_saved_min") is not None else target_best.get("saved_min", 0.0)
+                if cur_save > tgt_save:
+                    should_replace = True
+
+            chosen = cur if should_replace else duplicate_target
+            abandoned = duplicate_target if should_replace else cur
+
+            # 把被合併事件中走「不同道路」的額外備選方案收納進來
+            for extra_alt in abandoned.get("alternatives", []):
+                if not any(_are_routes_duplicate(extra_alt, exist_alt) for exist_alt in chosen.get("alternatives", [])):
+                    chosen["alternatives"].append(extra_alt)
+
+            if should_replace:
+                merged_can.remove(duplicate_target)
+                merged_can.append(chosen)
+
+    # 針對留下來的各事件內部，也過濾掉實質相同的備選方案
+    for ev in merged_can:
+        clean_alts: List[Dict[str, Any]] = []
+        for alt in ev.get("alternatives", []):
+            if not any(_are_routes_duplicate(alt, ca) for ca in clean_alts):
+                clean_alts.append(alt)
+        ev["alternatives"] = clean_alts
+        if clean_alts:
+            ev["best_saved_min"] = clean_alts[0].get("saved_min")
+
+    return merged_can + other_events
+
+
 @app.post("/api/route/alternatives")
 def route_alternatives(req: RouteAlternativesRequest):
     """將每條 leg 的壅塞依間隔分群成多個事件，各別推算改道點 (P1)/回歸點 (P2)，
@@ -1222,6 +1326,7 @@ def route_alternatives(req: RouteAlternativesRequest):
         if main_total_s <= 0:
             main_total_s = total_m / max(leg_nom, 1.0)
 
+        leg_items: List[Dict[str, Any]] = []
         for slot in slots:
             a, b = slot["a"], slot["b"]
             etype = slot.get("event_type", "SINGLE")
@@ -1242,7 +1347,7 @@ def route_alternatives(req: RouteAlternativesRequest):
                 "alternatives": [],
             }
             if evt_end - evt_start < REROUTE_MIN_WINDOW_M:
-                out_legs.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
+                leg_items.append({**base, "state": "CANNOT_REROUTE", "reason": "WINDOW_TOO_SHORT"})
                 continue
 
             # 2) 候選改道點：壅塞前/後取更遠的轉彎；轉彎用盡後以固定步進往兩側外推
@@ -1293,7 +1398,7 @@ def route_alternatives(req: RouteAlternativesRequest):
             if all_alts:
                 all_alts.sort(key=lambda a: (-a["saved_min"], a["eta_min"]))
                 best_alt = all_alts[0]
-                out_legs.append({
+                leg_items.append({
                     **base,
                     "state": "CAN_REROUTE",
                     "reason": None,
@@ -1309,12 +1414,16 @@ def route_alternatives(req: RouteAlternativesRequest):
                     reason = "FAKE_ALTERNATIVE"
                 else:
                     reason = "NO_TIME_SAVED"
-                out_legs.append({
+                leg_items.append({
                     **base,
                     "state": "CANNOT_REROUTE",
                     "reason": reason,
                     "best_nonfake_saved_min": round(best_nonfake, 1) if best_nonfake is not None else None,
                 })
+
+        # 比對道路及時間節省，合併減少同 Leg 內重複的改道事件
+        deduped = _deduplicate_leg_reroutes(leg_items)
+        out_legs.extend(deduped)
 
     return {"status": "success", "legs": out_legs}
 
