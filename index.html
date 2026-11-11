@@ -529,8 +529,42 @@
         .vd-sim-btn { font-size: 11px; padding: 2px 7px; border: 1px solid #cbd5e1; border-radius: 4px; background: #f8fafc; color: #334155; cursor: pointer; }
         .vd-sim-btn:hover { background: #e2e8f0; }
         .vd-sim-btn.active { background: #f59e0b; color: #ffffff; border-color: #f59e0b; }
-        .alt-eta-badge { background: rgba(255, 255, 255, 0.95); border: 1px solid #475569; color: #1e293b; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; white-space: nowrap; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); display: flex; align-items: center; gap: 4px; }
-        .alt-eta-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
+        .alt-eta-badge {
+            background: rgba(255, 255, 255, 0.96);
+            border: 1px solid #475569;
+            color: #1e293b;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 6px;
+            border-radius: 4px;
+            white-space: nowrap;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            line-height: 1.25;
+            pointer-events: auto;
+        }
+        .alt-eta-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .alt-eta-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+        }
+        .alt-eta-sq {
+            width: 9px;
+            height: 9px;
+            border-radius: 1px;
+            flex-shrink: 0;
+            box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2);
+            display: inline-block;
+        }
         .reroute-panel { margin: 4px 0 8px 28px; padding: 6px 8px; background: #f5f3ff; border: 1px solid #c4b5fd; border-radius: 6px; font-size: 11px; color: #5b21b6; }
         .reroute-panel.notice { background: #fffbeb; border-color: #fde68a; color: #92400e; }
         .reroute-title { font-weight: 700; margin-bottom: 4px; }
@@ -1388,16 +1422,26 @@
             if (!trip.is_computed || !trip.route_result || !trip.route_meta) return;
             const meta = trip.route_meta;
             if (!meta.cum || meta.cum.length < 2) return;
-            buildVdPointIndex();
+                        buildVdPointIndex();
             const vds = [];
             const seen = new Set();
-            (trip.vd_result.coverage || []).forEach(cov => {
-                if (seen.has(cov.vdid)) return;
-                seen.add(cov.vdid);
-                const p = vdPointIndex[cov.vdid];
-                const eff = effectiveVd(cov.vdid);
-                if (!p || p.lat == null || p.lon == null) return;
-                vds.push({ vdid: cov.vdid, lat: p.lat, lon: p.lon, speed: eff.speed || 0 });
+            const allPoints = (trip.vd_result && trip.vd_result.points && trip.vd_result.points.length)
+                ? trip.vd_result.points
+                : Object.values(vdPointIndex);
+            allPoints.forEach(p => {
+                if (!p || !p.vdid || seen.has(p.vdid)) return;
+                seen.add(p.vdid);
+                if (p.lat == null || p.lon == null) return;
+                const eff = effectiveVd(p.vdid);
+                vds.push({
+                    vdid: p.vdid,
+                    lat: p.lat,
+                    lon: p.lon,
+                    speed: (eff && eff.speed != null) ? eff.speed : (p.speed || 0),
+                    color: (eff && eff.color) ? eff.color : (p.color || 'GRAY'),
+                    anomaly_reason: (eff && eff.anomaly_reason) ? eff.anomaly_reason : (p.anomaly_reason || null),
+                    status: (p.status != null) ? p.status : 0
+                });
             });
             const coverage = [];
             (trip.vd_result.coverage || []).forEach(cov => {
@@ -1618,8 +1662,32 @@
                                 .bindTooltip(`Leg ${item.leg_index + 1} 備選${ai + 1}：整趟省 ${alt.saved_min.toFixed(1)} 分（${item.current_eta_min} → ${alt.eta_min} 分）`, { sticky: true });
                             const midPt = alt.seg_polyline[Math.floor(alt.seg_polyline.length / 2)];
                             if (midPt) {
+                                const colorHexMap = {
+                                    'GREEN': '#16a34a',
+                                    'ORANGE': '#ea580c',
+                                    'RED': '#dc2626',
+                                    'GRAY': '#94a3b8'
+                                };
+                                const rtColorHex = colorHexMap[alt.realtime_color] || '#94a3b8';
+                                let rtRowHtml = '';
+                                if (alt.has_vd_coverage) {
+                                    const isSlower = (alt.realtime_saved_min != null && alt.realtime_saved_min < 0);
+                                    const minVal = (alt.realtime_saved_min != null) ? Math.abs(alt.realtime_saved_min).toFixed(1) : '0.0';
+                                    const timeStr = isSlower ? `慢 ${minVal}分` : `省 ${minVal}分`;
+                                    const tagStr = alt.anomaly_tag ? `(即時-${alt.anomaly_tag})` : `(即時)`;
+                                    rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px;"><span>${timeStr} ${tagStr}</span><span class="alt-eta-sq" style="background:${rtColorHex};"></span></div>`;
+                                } else {
+                                    rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px; color:#64748b;"><span>無覆蓋</span><span class="alt-eta-sq" style="background:#94a3b8;"></span></div>`;
+                                }
+                                const badgeHtml = `<div class="alt-eta-badge">
+                                    <div class="alt-eta-row">
+                                        <span class="alt-eta-dot" style="background:${trip.color};"></span>
+                                        <span>省 ${alt.saved_min.toFixed(1)}分 (預估)</span>
+                                    </div>
+                                    ${rtRowHtml}
+                                </div>`;
                                 L.marker(midPt, {
-                                    icon: L.divIcon({ className: '', html: `<div class="alt-eta-badge"><span class="alt-eta-dot" style="background:${trip.color};"></span>省 ${alt.saved_min.toFixed(1)} 分</div>`, iconSize: [90, 18], iconAnchor: [45, 9] }),
+                                    icon: L.divIcon({ className: '', html: badgeHtml, iconSize: [130, 36], iconAnchor: [65, 18] }),
                                     interactive: false
                                 }).addTo(layerGroup);
                             }
@@ -1960,8 +2028,30 @@
                             : (isComb ? `建議整合改道（Leg ${index + 1}，避開連續壅塞）` : `建議改道（Leg ${index + 1}）`);
                         let rrHtml = `<div class="reroute-title">${titleText}</div>`;
                         validAlts.forEach((alt, ai) => {
-                            rrHtml += `<div class="reroute-row"><span>備選 ${ai + 1}：省 ${alt.saved_min.toFixed(1)} 分（整趟 ${item.current_eta_min} → ${alt.eta_min} 分）</span>`
-                                + `<button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}">套用</button></div>`;
+                            const colorHexMap = {
+                                'GREEN': '#16a34a',
+                                'ORANGE': '#ea580c',
+                                'RED': '#dc2626',
+                                'GRAY': '#94a3b8'
+                            };
+                            const rtColorHex = colorHexMap[alt.realtime_color] || '#94a3b8';
+                            let rtDetail = '';
+                            if (alt.has_vd_coverage) {
+                                const isSlower = (alt.realtime_saved_min != null && alt.realtime_saved_min < 0);
+                                const minVal = (alt.realtime_saved_min != null) ? Math.abs(alt.realtime_saved_min).toFixed(1) : '0.0';
+                                const timeStr = isSlower ? `慢 ${minVal} 分` : `省 ${minVal} 分`;
+                                const tagStr = alt.anomaly_tag ? `(即時-${alt.anomaly_tag})` : `(即時)`;
+                                rtDetail = `<span style="display:inline-flex; align-items:center; gap:4px;">${timeStr} ${tagStr} <span class="alt-eta-sq" style="background:${rtColorHex};"></span></span>`;
+                            } else {
+                                rtDetail = `<span style="display:inline-flex; align-items:center; gap:4px; color:#64748b;">無覆蓋 <span class="alt-eta-sq" style="background:#94a3b8;"></span></span>`;
+                            }
+                            rrHtml += `<div class="reroute-row" style="align-items:flex-start; margin-bottom:4px;">
+                                <div style="display:flex; flex-direction:column; gap:2px;">
+                                    <span>備選 ${ai + 1}：省 ${alt.saved_min.toFixed(1)} 分 (預估)</span>
+                                    <span style="font-size:10px; color:#475569; margin-left:8px;">${rtDetail}</span>
+                                </div>
+                                <button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}" style="margin-top:2px;">套用</button>
+                            </div>`;
                         });
                         rrPanel.innerHTML = rrHtml;
                         flowContainer.appendChild(rrPanel);

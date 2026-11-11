@@ -334,23 +334,31 @@ def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str,
             status = entry.get("Status")
             levels = levels_by_vdid.get(vdid)
             anomaly_reason = None
-            if speed is None or status not in (None, 0):
-                color, level, speed_valid, levels = "GRAY", None, False, None
-            elif not is_speed_valid(speed):
+
+            # 取得該路段等級 1 (A級綠色) 代表速作為預設速度，若無則預設 50.0 km/h
+            green_speed = 50.0
+            if levels:
+                for lv in levels:
+                    if lv.get("Level") == 1:
+                        lo = float(lv.get("LowValue") or 0.0)
+                        top = float(lv.get("TopValue") or (lo + 20.0))
+                        green_speed = round((lo + top) / 2.0, 1)
+                        break
+
+            if status not in (None, 0):
+                # 設備異常：預設綠色並標記
                 color, level, speed_valid = "GREEN", 1, False
-                if speed < SPEED_VALID_MIN:
-                    anomaly_reason = f"車速低於下限 ({speed:.1f} < {SPEED_VALID_MIN} km/h)"
-                else:
-                    anomaly_reason = f"車速高於上限 ({speed:.1f} > {SPEED_VALID_MAX} km/h)"
-                # 異常時以該路段等級 1 (A級綠色) 代表速作為預設速度，若無則預設 50.0 km/h
-                green_speed = 50.0
-                if levels:
-                    for lv in levels:
-                        if lv.get("Level") == 1:
-                            lo = float(lv.get("LowValue") or 0.0)
-                            top = float(lv.get("TopValue") or (lo + 20.0))
-                            green_speed = round((lo + top) / 2.0, 1)
-                            break
+                anomaly_reason = "設備異常"
+                speed = green_speed
+            elif speed is None:
+                # 無資料：預設綠色並標記
+                color, level, speed_valid = "GREEN", 1, False
+                anomaly_reason = "無資料"
+                speed = green_speed
+            elif not is_speed_valid(speed):
+                # 車速異常（低於下限或高於上限）：預設綠色並標記
+                color, level, speed_valid = "GREEN", 1, False
+                anomaly_reason = "車速異常"
                 speed = green_speed
             else:
                 level = classify_congestion(speed, levels)

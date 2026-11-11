@@ -246,8 +246,6 @@ def compute_vd_overlay(profile: Dict[str, Any], cities: List[str],
             off, s = _project_point_to_path(lat, lon, path, cum)
 
             entry = live.get(vdid)
-            if entry is not None and entry.get("status") != 0:
-                continue
             speed = entry.get("speed") if entry else None
             color = entry.get("color") if entry else "GRAY"
             level = entry.get("level") if entry else None
@@ -1003,16 +1001,62 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
 
         alt_osrm_s = _capped_route_duration_s(rt) or float(rt.get("duration") or 0.0)
         alt_nom = (alt_total_m / alt_osrm_s) if alt_osrm_s > 0 else 15.0
-        merged_alt = _vd_intervals_on_path(alt_path, alt_cum, vds)
-        alt_p1p2_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
-        cand_total_s = main_total_s - main_p1p2_s + alt_p1p2_s
-        saved_min = (main_total_s - cand_total_s) / 60.0
+
+        # 1. 預估基準省時（以一般道路速限基準計算，維持候選路線產出）
+        base_saved_min = (main_p1p2_s - alt_osrm_s) / 60.0
+        saved_min = base_saved_min
 
         best_nonfake = stats["best_nonfake_saved_min"]
         if best_nonfake is None or saved_min > best_nonfake:
             stats["best_nonfake_saved_min"] = saved_min
         if saved_min <= REROUTE_MIN_SAVED_MIN:
             continue
+
+        # 2. 替代路徑的 VD 覆蓋檢查與即時路況計算
+        covered_vds: List[Dict[str, Any]] = []
+        for vd in vds:
+            try:
+                lat_v = float(vd["lat"])
+                lon_v = float(vd["lon"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            off, s_pos = _project_point_to_path(lat_v, lon_v, alt_path, alt_cum)
+            if off <= COVERAGE_THRESHOLD_M:
+                covered_vds.append(vd)
+
+        has_vd_coverage = (len(covered_vds) > 0)
+        rt_saved_min: Optional[float] = None
+        rt_color = "GRAY"
+        anomaly_tag = None
+
+        if has_vd_coverage:
+            merged_alt = _vd_intervals_on_path(alt_path, alt_cum, covered_vds)
+            alt_rt_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
+            rt_saved_min = (main_p1p2_s - alt_rt_s) / 60.0
+
+            # 顏色嚴重度：RED > ORANGE > GREEN > GRAY
+            has_red = any(v.get("color") == "RED" for v in covered_vds)
+            has_orange = any(v.get("color") == "ORANGE" for v in covered_vds)
+            has_green = any(v.get("color") == "GREEN" for v in covered_vds)
+            if has_red:
+                rt_color = "RED"
+            elif has_orange:
+                rt_color = "ORANGE"
+            elif has_green:
+                rt_color = "GREEN"
+            else:
+                rt_color = "GRAY"
+
+            # 異常原因標註：車速異常 > 無資料 > 設備異常
+            reasons = [str(v.get("anomaly_reason") or "") for v in covered_vds]
+            if any("車速" in r for r in reasons):
+                anomaly_tag = "車速異常"
+            elif any("無" in r for r in reasons):
+                anomaly_tag = "無資料"
+            elif any("設備" in r for r in reasons):
+                anomaly_tag = "設備異常"
+            elif any(v.get("status") not in (None, 0) for v in covered_vds):
+                anomaly_tag = "設備異常"
 
         alts.append({
             "seg_polyline": alt_path,
@@ -1022,12 +1066,16 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
             "leg_end_m": round(leg_end, 1),
             "main_p1p2_min": round(main_p1p2_s / 60.0, 1),
             "base_p1p2_min": round(base_p1p2_s / 60.0, 1),
-            "alt_p1p2_min": round(alt_p1p2_s / 60.0, 1),
-            "eta_min": round(cand_total_s / 60.0, 1),
+            "alt_p1p2_min": round(alt_osrm_s / 60.0, 1),
+            "eta_min": round((main_total_s - main_p1p2_s + alt_osrm_s) / 60.0, 1),
             "saved_min": round(saved_min, 1),
             "distance_km": round(alt_total_m / 1000.0, 2),
             "exit_at": exit_at,
             "rejoin_at": rejoin_at,
+            "has_vd_coverage": has_vd_coverage,
+            "realtime_saved_min": round(rt_saved_min, 1) if rt_saved_min is not None else None,
+            "realtime_color": rt_color,
+            "anomaly_tag": anomaly_tag,
         })
     alts.sort(key=lambda a: (-a["saved_min"], a["eta_min"]))
     return alts, stats
@@ -1038,6 +1086,9 @@ class RouteAltVd(BaseModel):
     lat: float
     lon: float
     speed: Optional[float] = None
+    color: Optional[str] = "GRAY"
+    anomaly_reason: Optional[str] = None
+    status: Optional[Any] = None
 
 
 class RouteAltLeg(BaseModel):
