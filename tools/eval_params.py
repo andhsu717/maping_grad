@@ -3,7 +3,9 @@
 兩個模式：
 
   collect  定時收集 TDX 偵測器即時資料（每個方向、每個車道的車速、車流量、佔有率）
-      python tools/eval_params.py collect --cities Taoyuan,Taipei --every 300 --until "2026-11-12 19:30"
+      python tools/eval_params.py collect --cities Taoyuan,Taipei --every 300 --until "2026-11-12 19:30" \
+          --windows "07:00-09:30,11:30-13:00,16:30-19:30"
+      （--windows 只在指定時段收集，避開深夜等無效時段，節省 TDX 呼叫次數）
       輸出：eval_output/tdx_snapshots/<城市>_<日期>.jsonl.gz（每次快照一行，可中斷後續跑）
 
   analyze  分析收集到的資料
@@ -55,12 +57,40 @@ def _snapshot(city):
     return vds
 
 
-def collect(cities, every, until):
+def _parse_windows(spec):
+    """'07:00-09:30,16:30-19:30' → [(time, time), ...]；空字串表示全天收集。"""
+    out = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if part:
+            a, b = part.split("-")
+            out.append((dt.datetime.strptime(a, "%H:%M").time(), dt.datetime.strptime(b, "%H:%M").time()))
+    return out
+
+
+def _next_window_start(now, windows):
+    """目前不在收集時段時，回傳下一個時段的開始時間（節省 TDX 呼叫次數）。"""
+    if not windows or any(a <= now.time() < b for a, b in windows):
+        return None
+    starts = [dt.datetime.combine(now.date(), a) for a, _ in windows]
+    future = [s for s in starts if s > now]
+    return min(future) if future else dt.datetime.combine(now.date() + dt.timedelta(days=1), min(a for a, _ in windows))
+
+
+def collect(cities, every, until, windows=""):
     os.makedirs(SNAP_DIR, exist_ok=True)
     end = dt.datetime.strptime(until, "%Y-%m-%d %H:%M")
+    wins = _parse_windows(windows)
     log = open(os.path.join(OUT_DIR, "collect.log"), "a", encoding="utf-8")
+    if wins:
+        log.write(f"{dt.datetime.now():%H:%M:%S} windows {windows}\n")
+        log.flush()
     while dt.datetime.now() < end:
         now = dt.datetime.now()
+        nxt_start = _next_window_start(now, wins)
+        if nxt_start is not None:  # 不在收集時段：睡到下一個時段（或結束時間）
+            time.sleep(max(5, (min(nxt_start, end) - now).total_seconds()))
+            continue
         for city in cities:
             try:
                 time.sleep(5)  # 城市之間稍停，避免觸發 TDX 每秒呼叫上限
@@ -191,10 +221,12 @@ def main():
     c.add_argument("--cities", default="Taoyuan,Taipei")
     c.add_argument("--every", type=int, default=300, help="收集間隔（秒）")
     c.add_argument("--until", required=True, help='結束時間，例如 "2026-11-12 19:30"')
+    c.add_argument("--windows", default="",
+                   help='只在這些時段收集以節省 TDX 次數，例如 "07:00-09:30,11:30-13:00,16:30-19:30"；省略＝全天')
     sub.add_parser("analyze")
     a = ap.parse_args()
     if a.cmd == "collect":
-        collect([x.strip() for x in a.cities.split(",") if x.strip()], a.every, a.until)
+        collect([x.strip() for x in a.cities.split(",") if x.strip()], a.every, a.until, a.windows)
     else:
         analyze()
 
