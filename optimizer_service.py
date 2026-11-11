@@ -921,6 +921,69 @@ def _has_uturn(route: Dict[str, Any]) -> bool:
     return False
 
 
+def _has_retrace_turn(path: List[List[float]]) -> bool:
+    """方案一：幾何原路折返檢測（檢測是否原路進出死巷或在同條路反向折返）。"""
+    if len(path) < 4:
+        return False
+
+    cum = [0.0]
+    for i in range(1, len(path)):
+        cum.append(cum[-1] + haversine_distance_meters(path[i - 1][0], path[i - 1][1], path[i][0], path[i][1]))
+    total_m = cum[-1]
+    if total_m < 60.0:
+        return False
+
+    # 1. 均勻取樣 (每 15 公尺一個點)
+    step_m = 15.0
+    cur_s = 0.0
+    samples: List[Tuple[float, float, float]] = []
+    while cur_s <= total_m:
+        pt = _path_point_at(path, cum, cur_s)
+        samples.append((pt[0], pt[1], cur_s))
+        cur_s += step_m
+
+    if len(samples) < 4:
+        return False
+
+    # 2. 計算各取樣點前進單位向量
+    lat_mid = samples[len(samples) // 2][0]
+    scale_y = 111000.0
+    scale_x = 111000.0 * math.cos(math.radians(lat_mid))
+
+    vectors: List[Tuple[float, float]] = []
+    for i in range(len(samples) - 1):
+        dy = (samples[i + 1][0] - samples[i][0]) * scale_y
+        dx = (samples[i + 1][1] - samples[i][1]) * scale_x
+        norm = math.hypot(dx, dy)
+        if norm > 1e-4:
+            vectors.append((dx / norm, dy / norm))
+        else:
+            vectors.append((0.0, 0.0))
+
+    # 3. 雙重迴圈檢驗：空間距離 <= 25m 但沿路里程差距 >= 50m 且方向相反 (dot < -0.70)
+    retrace_len = 0.0
+    for i in range(len(vectors)):
+        vx_i, vy_i = vectors[i]
+        if vx_i == 0.0 and vy_i == 0.0:
+            continue
+        p_i = samples[i]
+        for j in range(i + 3, len(vectors)):
+            p_j = samples[j]
+            if (p_j[2] - p_i[2]) < 50.0:
+                continue
+            dist = haversine_distance_meters(p_i[0], p_i[1], p_j[0], p_j[1])
+            if dist <= 25.0:
+                vx_j, vy_j = vectors[j]
+                dot = vx_i * vx_j + vy_i * vy_j
+                if dot < -0.70:  # 反向夾角 > 135度，代表在同條路上朝相反方向開
+                    retrace_len += step_m
+                    if retrace_len >= 30.0:
+                        return True
+                    break
+
+    return False
+
+
 def _reroute_candidates(path: List[List[float]], cum: List[float],
                         vds: List[Dict[str, Any]], merged_main: List[List[float]],
                         p1: float, p2: float, leg_start: float, leg_end: float,
@@ -1020,6 +1083,10 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
 
         alt_path = [[c[1], c[0]] for c in (rt.get("geometry") or {}).get("coordinates", [])]
         if len(alt_path) < 2:
+            continue
+
+        # 方案一：幾何原路折返檢測（進出死巷或在同條路反向調頭直接剃除）
+        if _has_retrace_turn(alt_path):
             continue
 
         # 幾何重複過濾
