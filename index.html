@@ -1547,31 +1547,6 @@
             return out.filter(Boolean);
         }
 
-        function isPathRevertingToReplacedSegment(altPath, replacedSeg) {
-            if (!altPath || altPath.length < 2 || !replacedSeg || replacedSeg.length < 2) return false;
-            const n = altPath.length;
-            const startIdx = Math.max(1, Math.floor(n * 0.2));
-            const endIdx = Math.min(n - 1, Math.floor(n * 0.8));
-            const samplePts = altPath.slice(startIdx, endIdx);
-            if (!samplePts.length) return false;
-
-            let closeCount = 0;
-            for (let i = 0; i < samplePts.length; i++) {
-                const pt = samplePts[i];
-                let minDist = Infinity;
-                for (let j = 0; j < replacedSeg.length; j++) {
-                    const rp = replacedSeg[j];
-                    const dx = (pt[1] - rp[1]) * 102000;
-                    const dy = (pt[0] - rp[0]) * 111000;
-                    const d = Math.hypot(dx, dy);
-                    if (d < minDist) minDist = d;
-                    if (minDist <= 35) break;
-                }
-                if (minDist <= 40) closeCount++;
-            }
-            return (closeCount / samplePts.length) >= 0.70;
-        }
-
         function scheduleRerouteScan(trip) {
             if (!trip || !trip.is_computed || !trip.route_result || !trip.route_meta) return;
             clearTimeout(rerouteScanTimers[trip.trip_key]);
@@ -1634,7 +1609,9 @@
                         counties: (trip.vd_result && trip.vd_result.counties) || [],
                         legs: legs,
                         speed_segments: meta.speed_segments || [],
-                        road_segments: meta.road_segments || []
+                        road_segments: meta.road_segments || [],
+                        // 已套用改道所取代的原路段：後端據此剔除繞回原路的候選（顯示「已避開原定路線」）
+                        replaced_segments: trip.replacedSegments || []
                     })
                 });
                 if (!resp.ok) {
@@ -1642,21 +1619,7 @@
                     return;
                 }
                 const data = await resp.json();
-                const rawLegs = data.legs || [];
-                trip.rerouteOptions = rawLegs.map(item => {
-                    if (trip.replacedSegments && trip.replacedSegments.length && item.alternatives && item.alternatives.length) {
-                        item.alternatives = item.alternatives.filter(alt => {
-                            if (!alt.seg_polyline) return true;
-                            const reverts = trip.replacedSegments.some(seg => isPathRevertingToReplacedSegment(alt.seg_polyline, seg));
-                            return !reverts;
-                        });
-                        if (!item.alternatives.length && item.state === 'CAN_REROUTE') {
-                            item.state = 'CANNOT_REROUTE';
-                            item.reason = 'REVERTED_ORIGINAL';
-                        }
-                    }
-                    return item;
-                });
+                trip.rerouteOptions = data.legs || [];
                 const withAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CAN_REROUTE' && x.alternatives && x.alternatives.length).length;
                 const noAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CANNOT_REROUTE' || !x.alternatives || !x.alternatives.length).length;
                 console.log(`改道掃描完成 (${trip.trip_key})：${withAlts} 段有建議省時改道，${noAlts} 段未改道`);
