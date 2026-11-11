@@ -449,12 +449,25 @@ def level_name(levels: Optional[List[Dict[str, Any]]], level: Optional[int]) -> 
     return ""
 
 
+def usable_levels(levels: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+    """過濾無效的官方門檻：所有 LowValue／TopValue 皆為 0 或空值的定義（實測桃園約 3 成）
+    會讓任何車速都落在 A 級，視為「沒有官方門檻」，改用 40／20 預設分界。"""
+    if not levels:
+        return None
+    for lv in levels:
+        for k in ("LowValue", "TopValue"):
+            v = lv.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                return levels
+    return None
+
+
 def _link_levels(lid: str, by_clid: Dict[str, List[Dict[str, Any]]],
                  link2clid: Optional[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
     if lid in by_clid:
-        return by_clid[lid]
+        return usable_levels(by_clid[lid])
     if link2clid and lid in link2clid:
-        return by_clid.get(link2clid[lid])
+        return usable_levels(by_clid.get(link2clid[lid]))
     return None
 
 
@@ -483,7 +496,7 @@ def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str,
             if not vdid:
                 continue
             vd = static_by_vdid.get(vdid) or {}
-            vd_levels = _resolve_levels(vd, by_clid, link2clid) if vd else None
+            vd_levels = usable_levels(_resolve_levels(vd, by_clid, link2clid)) if vd else None
             links = static_links(vd)
             for flow in (entry.get("LinkFlows") or []):
                 lid = flow.get("LinkID")
