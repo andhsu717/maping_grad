@@ -494,6 +494,10 @@
         /* 改道備選路徑：黑色透明動態虛線 */
         @keyframes reroute-march { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -36; } }
         .reroute-flow { stroke-dasharray: 10 8; animation: reroute-march 0.9s linear infinite; }
+        /* 改道虛線方向箭頭（依行進方向旋轉，間距隨縮放調整） */
+        .reroute-arrow-icon { pointer-events: none; }
+        .reroute-arrow { width: 14px; height: 14px; line-height: 0; transform-origin: 50% 50%; }
+        .reroute-arrow svg { display: block; }
 
         /* VD 警告圖示（單一顏色，路線上的加外框強調） */
         .vd-warn-icon { line-height: 0; }
@@ -778,6 +782,7 @@
         const expandedDates = new Set(); 
         const tripLayerGroups = {}; 
         const vdLayerGroup = L.layerGroup();
+        const rerouteArrowLayer = L.layerGroup();  // 改道虛線方向箭頭（縮放時重繪）
         let showUncoveredVd = false; // 是否顯示未覆蓋（不在路線上）的 VD
         const vdManualOverride = {}; // vdid -> 模擬壅塞等級 1~5
         let vdPointIndex = {};       // vdid -> 最新 VD 點資料（含 levels）
@@ -794,6 +799,7 @@
         }).addTo(map);
         depotLayer.addTo(map);
         vdLayerGroup.addTo(map);
+        rerouteArrowLayer.addTo(map);
 
         function updateMapZoomClass() {
             const z = map.getZoom();
@@ -808,6 +814,57 @@
         }
         map.on('zoomend', updateMapZoomClass);
         updateMapZoomClass();
+        map.on('zoomend', () => renderRerouteArrows());
+
+        // 兩點方位角（度，0=北，順時針）
+        function bearingDegJs(a, b) {
+            const toRad = Math.PI / 180;
+            const phi1 = a[0] * toRad, phi2 = b[0] * toRad, dLon = (b[1] - a[1]) * toRad;
+            const x = Math.sin(dLon) * Math.cos(phi2);
+            const y = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLon);
+            return (Math.atan2(x, y) / toRad + 360) % 360;
+        }
+
+        function polylineCum(pts) {
+            const cum = [0];
+            for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + map.distance(pts[i - 1], pts[i]));
+            return cum;
+        }
+
+        // 沿改道虛線放置方向箭頭：螢幕上約每 90px 一個（每條最多 40 個）
+        const REROUTE_ARROW_SPACING_PX = 90;
+        const REROUTE_ARROW_MAX = 40;
+        function renderRerouteArrows() {
+            rerouteArrowLayer.clearLayers();
+            const zoom = map.getZoom();
+            Object.values(tripStore).forEach(trip => {
+                if (!trip.is_computed || !trip.route_result) return;
+                (trip.rerouteOptions || []).forEach(item => {
+                    (item.alternatives || []).forEach(alt => {
+                        const pts = alt.seg_polyline;
+                        if (!pts || pts.length < 2 || alt.saved_min < 0.5) return;
+                        const cum = polylineCum(pts);
+                        const total = cum[cum.length - 1];
+                        if (total <= 0) return;
+                        const mPerPx = 40075016.686 * Math.cos(pts[0][0] * Math.PI / 180) / Math.pow(2, zoom + 8);
+                        const spacing = Math.max(total / REROUTE_ARROW_MAX, REROUTE_ARROW_SPACING_PX * mPerPx);
+                        for (let d = spacing / 2; d < total; d += spacing) {
+                            const p = pathPointAt(pts, cum, d);
+                            const q0 = pathPointAt(pts, cum, Math.max(0, d - 5));
+                            const q1 = pathPointAt(pts, cum, Math.min(total, d + 5));
+                            if (!p || !q0 || !q1) continue;
+                            const brg = bearingDegJs(q0, q1);
+                            const html = `<div class="reroute-arrow" style="transform: rotate(${brg.toFixed(0)}deg);">`
+                                + '<svg viewBox="0 0 14 14" width="14" height="14"><path d="M7 1 L12.5 11 L7 8.2 L1.5 11 Z" fill="#111111" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"/></svg></div>';
+                            L.marker(p, {
+                                icon: L.divIcon({ className: 'reroute-arrow-icon', html, iconSize: [14, 14], iconAnchor: [7, 7] }),
+                                interactive: false, keyboard: false
+                            }).addTo(rerouteArrowLayer);
+                        }
+                    });
+                });
+            });
+        }
 
         function toggleAltEtaBadge(el, e) {
             if (e) {
@@ -1916,6 +1973,7 @@
             renderVdLayer();
 
             if (allBounds.length > 0) map.fitBounds(L.latLngBounds(allBounds).pad(0.08));
+            renderRerouteArrows();
         }
 
         function renderVdLayer() {
