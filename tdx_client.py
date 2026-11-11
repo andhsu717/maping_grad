@@ -346,20 +346,20 @@ def live_map(cities: List[str], force_live: bool = False) -> Dict[str, Dict[str,
                         break
 
             if status not in (None, 0):
-                # 設備異常：預設綠色並標記
-                color, level, speed_valid = "GREEN", 1, False
+                # 設備異常：類似無覆蓋（灰色無效，不參與計算）
+                color, level, speed_valid = "GRAY", None, False
                 anomaly_reason = "設備異常"
-                speed = green_speed
+                speed = None
             elif speed is None:
-                # 無資料：預設綠色並標記
-                color, level, speed_valid = "GREEN", 1, False
+                # 無資料：類似無覆蓋（灰色無效，不參與計算）
+                color, level, speed_valid = "GRAY", None, False
                 anomaly_reason = "無資料"
-                speed = green_speed
+                speed = None
             elif not is_speed_valid(speed):
-                # 車速異常（低於下限或高於上限）：預設綠色並標記
-                color, level, speed_valid = "GREEN", 1, False
+                # 車速異常（低於下限 8km/h 或高於上限 150km/h）：類似無覆蓋（灰色無效，不參與計算）
+                color, level, speed_valid = "GRAY", None, False
                 anomaly_reason = "車速異常"
-                speed = green_speed
+                speed = None
             else:
                 level = classify_congestion(speed, levels)
                 color = level_color(level)

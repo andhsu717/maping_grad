@@ -1669,15 +1669,15 @@
                                     'GRAY': '#94a3b8'
                                 };
                                 const rtColorHex = colorHexMap[alt.realtime_color] || '#94a3b8';
-                                let rtRowHtml = '';
-                                if (alt.has_vd_coverage) {
-                                    const isSlower = (alt.realtime_saved_min != null && alt.realtime_saved_min < 0);
-                                    const minVal = (alt.realtime_saved_min != null) ? Math.abs(alt.realtime_saved_min).toFixed(1) : '0.0';
-                                    const timeStr = isSlower ? `慢 ${minVal}分` : `省 ${minVal}分`;
-                                    const tagStr = alt.anomaly_tag ? `(即時-${alt.anomaly_tag})` : `(即時)`;
-                                    rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px;"><span>${timeStr} ${tagStr}</span><span class="alt-eta-sq" style="background:${rtColorHex};"></span></div>`;
+                                                                let rtRowHtml = '';
+                                if (alt.has_vd_coverage && alt.realtime_saved_min != null) {
+                                    const isSlower = alt.realtime_saved_min < 0;
+                                    const minVal = Math.abs(alt.realtime_saved_min).toFixed(1);
+                                    const timeStr = isSlower ? `即時慢 ${minVal}分` : `即時省 ${minVal}分`;
+                                    rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px;"><span>${timeStr}</span><span class="alt-eta-sq" style="background:${rtColorHex};"></span></div>`;
                                 } else {
-                                    rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px; color:#64748b;"><span>無覆蓋</span><span class="alt-eta-sq" style="background:#94a3b8;"></span></div>`;
+                                    const anomText = alt.anomaly_tag ? alt.anomaly_tag : '無覆蓋';
+                                    rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px; color:#64748b;"><span>${anomText}</span><span class="alt-eta-sq" style="background:#94a3b8;"></span></div>`;
                                 }
                                 const badgeHtml = `<div class="alt-eta-badge">
                                     <div class="alt-eta-row">
@@ -2009,10 +2009,25 @@
                     }
 
                     // 1. 已套用改道面板
-                    legApplied.forEach(ap => {
+                                        legApplied.forEach(ap => {
                         const donePanel = document.createElement('div');
                         donePanel.className = 'reroute-panel';
-                        donePanel.innerHTML = `<div class="reroute-title" style="color:#059669;">✓ 已套用改道（Leg ${index + 1}，省 ${ap.alt.saved_min.toFixed(1)} 分）</div>`;
+                        const alt = ap.alt || {};
+                        let summaryHtml = '';
+                        if (alt.has_vd_coverage && alt.realtime_saved_min != null) {
+                            if (alt.realtime_saved_min >= 0) {
+                                summaryHtml = `<div class="reroute-title" style="color:#059669;">✓ 已套用改道（Leg ${index + 1}，即時省 ${alt.realtime_saved_min.toFixed(1)} 分）</div>`
+                                    + `<div style="font-size:10px; color:#475569; margin-top:2px;">預估省 ${alt.saved_min.toFixed(1)} 分（速限參考）</div>`;
+                            } else {
+                                summaryHtml = `<div class="reroute-title" style="color:#d97706;">⚠️ 已套用改道（Leg ${index + 1}，即時慢 ${Math.abs(alt.realtime_saved_min).toFixed(1)} 分）</div>`
+                                    + `<div style="font-size:10px; color:#b45309; margin-top:2px;">即時路況較慢，預估省 ${alt.saved_min.toFixed(1)} 分（僅供參考）</div>`;
+                            }
+                        } else {
+                            const note = alt.anomaly_tag ? `即時${alt.anomaly_tag}` : '無即時資料';
+                            summaryHtml = `<div class="reroute-title" style="color:#059669;">✓ 已套用改道（Leg ${index + 1}，預估省 ${alt.saved_min.toFixed(1)} 分）</div>`
+                                + `<div style="font-size:10px; color:#64748b; margin-top:2px;">${note}，以基準預估時間為準</div>`;
+                        }
+                        donePanel.innerHTML = summaryHtml;
                         flowContainer.appendChild(donePanel);
                     });
 
@@ -2035,22 +2050,33 @@
                                 'GRAY': '#94a3b8'
                             };
                             const rtColorHex = colorHexMap[alt.realtime_color] || '#94a3b8';
-                            let rtDetail = '';
-                            if (alt.has_vd_coverage) {
-                                const isSlower = (alt.realtime_saved_min != null && alt.realtime_saved_min < 0);
-                                const minVal = (alt.realtime_saved_min != null) ? Math.abs(alt.realtime_saved_min).toFixed(1) : '0.0';
-                                const timeStr = isSlower ? `慢 ${minVal} 分` : `省 ${minVal} 分`;
-                                const tagStr = alt.anomaly_tag ? `(即時-${alt.anomaly_tag})` : `(即時)`;
-                                rtDetail = `<span style="display:inline-flex; align-items:center; gap:4px;">${timeStr} ${tagStr} <span class="alt-eta-sq" style="background:${rtColorHex};"></span></span>`;
+                            let primaryText = '';
+                            let secondaryText = '';
+                            let btnStyle = '';
+
+                            if (alt.has_vd_coverage && alt.realtime_saved_min != null) {
+                                const isSlower = alt.realtime_saved_min < 0;
+                                const minVal = Math.abs(alt.realtime_saved_min).toFixed(1);
+                                if (isSlower) {
+                                    primaryText = `<span style="color:#b91c1c; font-weight:700;">備選 ${ai + 1}：即時慢 ${minVal} 分</span> <span class="alt-eta-sq" style="background:${rtColorHex};"></span>`;
+                                    secondaryText = `預估省 ${alt.saved_min.toFixed(1)} 分（即時路況較塞，套用前請評估）`;
+                                    btnStyle = 'background:#ea580c; border-color:#ea580c;';
+                                } else {
+                                    primaryText = `<span style="color:#047857; font-weight:700;">備選 ${ai + 1}：即時省 ${minVal} 分</span> <span class="alt-eta-sq" style="background:${rtColorHex};"></span>`;
+                                    secondaryText = `預估省 ${alt.saved_min.toFixed(1)} 分（基準速限時間）`;
+                                }
                             } else {
-                                rtDetail = `<span style="display:inline-flex; align-items:center; gap:4px; color:#64748b;">無覆蓋 <span class="alt-eta-sq" style="background:#94a3b8;"></span></span>`;
+                                const anomLabel = alt.anomaly_tag ? `${alt.anomaly_tag}` : '無即時覆蓋';
+                                primaryText = `<span>備選 ${ai + 1}：預估省 ${alt.saved_min.toFixed(1)} 分</span> <span class="alt-eta-sq" style="background:#94a3b8;"></span>`;
+                                secondaryText = `${anomLabel}（參考預估速限時間）`;
                             }
-                            rrHtml += `<div class="reroute-row" style="align-items:flex-start; margin-bottom:4px;">
-                                <div style="display:flex; flex-direction:column; gap:2px;">
-                                    <span>備選 ${ai + 1}：省 ${alt.saved_min.toFixed(1)} 分 (預估)</span>
-                                    <span style="font-size:10px; color:#475569; margin-left:8px;">${rtDetail}</span>
+
+                            rrHtml += `<div class="reroute-row" style="align-items:flex-start; margin-bottom:6px; padding:3px 0; border-bottom:1px dashed #e2e8f0;">
+                                <div style="display:flex; flex-direction:column; gap:2px; flex:1;">
+                                    <div style="display:flex; align-items:center; gap:5px; font-size:11px;">${primaryText}</div>
+                                    <div style="font-size:10px; color:#64748b;">${secondaryText}</div>
                                 </div>
-                                <button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}" style="margin-top:2px;">套用</button>
+                                <button class="reroute-apply-btn" data-trip="${trip.trip_key}" data-event="${item.event_id}" data-alt="${ai}" style="margin-top:2px; ${btnStyle}">套用</button>
                             </div>`;
                         });
                         rrPanel.innerHTML = rrHtml;

@@ -1013,7 +1013,9 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
             continue
 
         # 2. 替代路徑的 VD 覆蓋檢查與即時路況計算
-        covered_vds: List[Dict[str, Any]] = []
+        valid_vds: List[Dict[str, Any]] = []
+        anomaly_vds: List[Dict[str, Any]] = []
+
         for vd in vds:
             try:
                 lat_v = float(vd["lat"])
@@ -1022,22 +1024,28 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
                 continue
             off, s_pos = _project_point_to_path(lat_v, lon_v, alt_path, alt_cum)
             if off <= COVERAGE_THRESHOLD_M:
-                covered_vds.append(vd)
+                spd = vd.get("speed")
+                is_anomaly = bool(vd.get("anomaly_reason")) or (vd.get("status") not in (None, 0)) or (vd.get("color") == "GRAY")
+                if is_anomaly or spd is None or float(spd) <= 0:
+                    anomaly_vds.append(vd)
+                else:
+                    valid_vds.append(vd)
 
-        has_vd_coverage = (len(covered_vds) > 0)
+        # 只有在有「有效正常 VD」時才視為有效即時覆蓋；異常狀態直接視為類似無覆蓋（不參與時間膨脹）
+        has_vd_coverage = (len(valid_vds) > 0)
         rt_saved_min: Optional[float] = None
         rt_color = "GRAY"
         anomaly_tag = None
 
         if has_vd_coverage:
-            merged_alt = _vd_intervals_on_path(alt_path, alt_cum, covered_vds)
+            merged_alt = _vd_intervals_on_path(alt_path, alt_cum, valid_vds)
             alt_rt_s = _duration_over(merged_alt, 0.0, alt_total_m, alt_nom)
             rt_saved_min = (main_p1p2_s - alt_rt_s) / 60.0
 
-            # 顏色嚴重度：RED > ORANGE > GREEN > GRAY
-            has_red = any(v.get("color") == "RED" for v in covered_vds)
-            has_orange = any(v.get("color") == "ORANGE" for v in covered_vds)
-            has_green = any(v.get("color") == "GREEN" for v in covered_vds)
+            # 顏色嚴重度僅依據有效正常 VD：RED > ORANGE > GREEN
+            has_red = any(v.get("color") == "RED" for v in valid_vds)
+            has_orange = any(v.get("color") == "ORANGE" for v in valid_vds)
+            has_green = any(v.get("color") == "GREEN" for v in valid_vds)
             if has_red:
                 rt_color = "RED"
             elif has_orange:
@@ -1046,17 +1054,18 @@ def _reroute_candidates(path: List[List[float]], cum: List[float],
                 rt_color = "GREEN"
             else:
                 rt_color = "GRAY"
-
-            # 異常原因標註：車速異常 > 無資料 > 設備異常
-            reasons = [str(v.get("anomaly_reason") or "") for v in covered_vds]
-            if any("車速" in r for r in reasons):
-                anomaly_tag = "車速異常"
-            elif any("無" in r for r in reasons):
-                anomaly_tag = "無資料"
-            elif any("設備" in r for r in reasons):
-                anomaly_tag = "設備異常"
-            elif any(v.get("status") not in (None, 0) for v in covered_vds):
-                anomaly_tag = "設備異常"
+        else:
+            # 若無有效正常 VD，但有覆蓋到異常 VD，標註具體原因（呈現類似無覆蓋之灰色狀態）
+            if anomaly_vds:
+                reasons = [str(v.get("anomaly_reason") or "") for v in anomaly_vds]
+                if any("車速" in r for r in reasons):
+                    anomaly_tag = "車速異常"
+                elif any("無" in r for r in reasons):
+                    anomaly_tag = "無資料"
+                elif any("設備" in r for r in reasons):
+                    anomaly_tag = "設備異常"
+                else:
+                    anomaly_tag = "資料異常"
 
         alts.append({
             "seg_polyline": alt_path,
