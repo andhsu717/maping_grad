@@ -530,40 +530,120 @@
         .vd-sim-btn:hover { background: #e2e8f0; }
         .vd-sim-btn.active { background: #f59e0b; color: #ffffff; border-color: #f59e0b; }
         .alt-eta-badge {
-            background: rgba(255, 255, 255, 0.96);
-            border: 1px solid #475569;
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid #64748b;
             color: #1e293b;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 700;
-            padding: 3px 6px;
+            padding: 2px 5px;
             border-radius: 4px;
             white-space: nowrap;
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
-            display: flex;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+            display: inline-flex;
             flex-direction: column;
-            gap: 2px;
-            line-height: 1.25;
+            gap: 1.5px;
+            line-height: 1.2;
+            cursor: pointer;
             pointer-events: auto;
+            user-select: none;
+            transition: all 0.15s ease-in-out;
+            box-sizing: border-box;
+        }
+        .alt-eta-badge:hover {
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+            border-color: #0f172a;
         }
         .alt-eta-row {
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: 3.5px;
         }
         .alt-eta-dot {
-            width: 8px;
-            height: 8px;
+            width: 7px;
+            height: 7px;
             border-radius: 50%;
             flex-shrink: 0;
             box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
         }
         .alt-eta-sq {
-            width: 9px;
-            height: 9px;
+            width: 7.5px;
+            height: 7.5px;
             border-radius: 1px;
             flex-shrink: 0;
             box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2);
             display: inline-block;
+        }
+
+        /* 遠景（zoom < 13）預設收起形態：微型白色框 + 顏色球 */
+        .map-zoom-far .alt-eta-badge {
+            padding: 3px;
+            width: 18px;
+            height: 18px;
+            min-width: 18px;
+            box-sizing: border-box;
+            border-radius: 4px;
+            align-items: center;
+            justify-content: center;
+            background: #ffffff;
+            border: 1.5px solid #475569;
+        }
+        .map-zoom-far .alt-eta-badge .alt-eta-expanded-body {
+            display: none;
+        }
+        .map-zoom-far .alt-eta-badge .alt-eta-collapsed-dot {
+            display: block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.15);
+        }
+
+        /* 近景（zoom >= 13）或展開時預設形態 */
+        .alt-eta-collapsed-dot {
+            display: none;
+        }
+        .alt-eta-expanded-body {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5px;
+        }
+
+        /* 當在遠景被點擊展開時 */
+        .map-zoom-far .alt-eta-badge.force-expand {
+            width: auto;
+            height: auto;
+            min-width: unset;
+            padding: 2px 5px;
+        }
+        .map-zoom-far .alt-eta-badge.force-expand .alt-eta-collapsed-dot {
+            display: none;
+        }
+        .map-zoom-far .alt-eta-badge.force-expand .alt-eta-expanded-body {
+            display: flex;
+        }
+
+        /* 當在近景被點擊收起時 */
+        .map-zoom-near .alt-eta-badge.force-collapse {
+            padding: 3px;
+            width: 18px;
+            height: 18px;
+            min-width: 18px;
+            box-sizing: border-box;
+            border-radius: 4px;
+            align-items: center;
+            justify-content: center;
+            background: #ffffff;
+            border: 1.5px solid #475569;
+        }
+        .map-zoom-near .alt-eta-badge.force-collapse .alt-eta-expanded-body {
+            display: none;
+        }
+        .map-zoom-near .alt-eta-badge.force-collapse .alt-eta-collapsed-dot {
+            display: block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.15);
         }
         .reroute-panel { margin: 4px 0 8px 28px; padding: 6px 8px; background: #f5f3ff; border: 1px solid #c4b5fd; border-radius: 6px; font-size: 11px; color: #5b21b6; }
         .reroute-panel.notice { background: #fffbeb; border-color: #fde68a; color: #92400e; }
@@ -713,6 +793,34 @@
         }).addTo(map);
         depotLayer.addTo(map);
         vdLayerGroup.addTo(map);
+
+        function updateMapZoomClass() {
+            const z = map.getZoom();
+            const container = map.getContainer();
+            if (z < 13) {
+                container.classList.add('map-zoom-far');
+                container.classList.remove('map-zoom-near');
+            } else {
+                container.classList.add('map-zoom-near');
+                container.classList.remove('map-zoom-far');
+            }
+        }
+        map.on('zoomend', updateMapZoomClass);
+        updateMapZoomClass();
+
+        function toggleAltEtaBadge(el, e) {
+            if (e) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
+            const container = map.getContainer();
+            const isFar = container.classList.contains('map-zoom-far');
+            if (isFar) {
+                el.classList.toggle('force-expand');
+            } else {
+                el.classList.toggle('force-collapse');
+            }
+        }
 
         const vdToggleControl = L.control({ position: 'topright' });
         vdToggleControl.onAdd = function () {
@@ -1679,16 +1787,19 @@
                                     const anomText = alt.anomaly_tag ? alt.anomaly_tag : '無覆蓋';
                                     rtRowHtml = `<div class="alt-eta-row" style="margin-left: 12px; color:#64748b;"><span>${anomText}</span><span class="alt-eta-sq" style="background:#94a3b8;"></span></div>`;
                                 }
-                                const badgeHtml = `<div class="alt-eta-badge">
-                                    <div class="alt-eta-row">
-                                        <span class="alt-eta-dot" style="background:${trip.color};"></span>
-                                        <span>省 ${alt.saved_min.toFixed(1)}分 (預估)</span>
+                                                                const badgeHtml = `<div class="alt-eta-badge" onclick="toggleAltEtaBadge(this, event)" title="點擊展開/收起詳情">
+                                    <div class="alt-eta-collapsed-dot" style="background:${trip.color};"></div>
+                                    <div class="alt-eta-expanded-body">
+                                        <div class="alt-eta-row">
+                                            <span class="alt-eta-dot" style="background:${trip.color};"></span>
+                                            <span>省 ${alt.saved_min.toFixed(1)}分 (預估)</span>
+                                        </div>
+                                        ${rtRowHtml}
                                     </div>
-                                    ${rtRowHtml}
                                 </div>`;
                                 L.marker(midPt, {
-                                    icon: L.divIcon({ className: '', html: badgeHtml, iconSize: [130, 36], iconAnchor: [65, 18] }),
-                                    interactive: false
+                                    icon: L.divIcon({ className: '', html: badgeHtml, iconSize: null, iconAnchor: [9, 9] }),
+                                    interactive: true
                                 }).addTo(layerGroup);
                             }
                             if (alt.exit_at) {
