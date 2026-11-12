@@ -3,9 +3,12 @@ TDX 車輛偵測器 (VD) 資料用戶端
 - 憑證來源：key.env / .env（支援 `ID:`/`SERECT:` 與標準 `CLIENT_ID=`/`CLIENT_SECRET=`）
 - 靜態端點：GET /v2/Road/Traffic/VD/City/{City}        （設備清單，含經緯度）
 - 即時端點：GET /v2/Road/Traffic/Live/VD/City/{City}   （即時速度/流量）
-- token 與回應皆快取，遇 429 自動退避重試
+- token 與回應皆快取；呼叫額度（實測一般會員每分鐘 5 次）依回應標頭控制，遇 429 依 Retry-After 等待
+- 不常變動的資料（設備清單、壅塞門檻、路段對照）另存於系統暫存資料夾，重啟後端後免重抓
 """
+import json
 import os
+import tempfile
 import time
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,11 +47,17 @@ _STATIC_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_CACHE: Dict[str, Dict[str, Any]] = {}
 _LEVEL_CACHE: Dict[str, Dict[str, Any]] = {}
 _SECTION_CACHE: Dict[str, Dict[str, Any]] = {}
+_LINKMAP_CACHE: Dict[str, Dict[str, Any]] = {}
 _LOCK = threading.Lock()
+_CALL_LOCK = threading.Lock()   # 依序呼叫 TDX（多個請求同時進來時排隊，以正確控制額度）
+_QUOTA = {"remaining": None, "reset_at": 0.0}   # 由回應標頭得知的剩餘額度與重置時間
 
-STATIC_TTL_SEC = 24 * 3600
-LIVE_TTL_SEC = 60
-CONGESTION_TTL_SEC = 6 * 3600
+STATIC_TTL_SEC = 24 * 3600       # 設備清單、路段對照（靜態）
+LIVE_TTL_SEC = 180               # TDX 偵測器資料每 5 分鐘更新一次，3 分鐘內重複查詢沿用快取
+CONGESTION_TTL_SEC = 24 * 3600   # 官方壅塞門檻（幾乎不變）
+MAX_QUOTA_WAIT_SEC = 65          # 額度用完時最多等待秒數（額度每分鐘重置）
+MAX_ATTEMPTS = 3
+DISK_CACHE_DIR = os.path.join(tempfile.gettempdir(), "map_co_tdx_cache")
 
 # 公路局 fallback 門檻（無官方逐路段定義時使用，單位 km/h）
 FALLBACK_LEVEL_SPEED = [(40.0, 1), (20.0, 3), (0.0, 5)]
@@ -120,18 +129,76 @@ def get_token(force: bool = False) -> Optional[str]:
             return None
 
 
+def _disk_load(kind: str, city: str, ttl: float) -> Optional[Any]:
+    """讀取存在硬碟的靜態資料；超過 ttl 或讀取失敗回傳 None。"""
+    path = os.path.join(DISK_CACHE_DIR, f"{kind}_{city}.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if time.time() < float(obj.get("ts", 0)) + ttl:
+            return obj.get("data")
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _disk_save(kind: str, city: str, data: Any) -> None:
+    try:
+        os.makedirs(DISK_CACHE_DIR, exist_ok=True)
+        tmp = os.path.join(DISK_CACHE_DIR, f"{kind}_{city}.json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "data": data}, f, ensure_ascii=False)
+        os.replace(tmp, os.path.join(DISK_CACHE_DIR, f"{kind}_{city}.json"))
+    except OSError:
+        pass
+
+
+def _note_quota(resp) -> None:
+    """記錄回應標頭中的剩餘額度與重置秒數。"""
+    h = resp.headers
+    try:
+        rem = h.get("X-RateLimit-Remaining-Minute") or h.get("RateLimit-Remaining")
+        reset = h.get("Retry-After") or h.get("RateLimit-Reset")
+        if rem is not None:
+            _QUOTA["remaining"] = int(rem)
+        if reset is not None:
+            _QUOTA["reset_at"] = time.time() + min(float(reset), MAX_QUOTA_WAIT_SEC)
+    except (TypeError, ValueError):
+        pass
+
+
+def _quota_get(url: str, params: Dict[str, Any], headers: Dict[str, str]):
+    """依序呼叫 TDX；已知額度用完時，先等到額度重置再呼叫，避免收到 429。"""
+    with _CALL_LOCK:
+        if _QUOTA["remaining"] == 0:
+            wait = _QUOTA["reset_at"] - time.time()
+            if wait > 0:
+                time.sleep(min(wait, MAX_QUOTA_WAIT_SEC))
+            _QUOTA["remaining"] = None
+        resp = requests.get(url, params=params, headers=headers, timeout=60)
+        _note_quota(resp)
+        return resp
+
+
 def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
+    """呼叫 TDX；成功回傳 JSON，失敗（重試用盡、非 200）回傳 None。
+
+    遇 429（超過每分鐘額度）依 Retry-After 等待後重試；401／403 時重新取得 token。
+    """
     params = dict(params or {})
     params.setdefault("$format", "JSON")
     url = f"{TDX_BASE}{path}"
-    for attempt in range(4):
-        token = get_token(force=(attempt > 0 and attempt < 2))
+    for attempt in range(MAX_ATTEMPTS):
+        token = get_token(force=(attempt == 1))
         headers = dict(HEADERS_BASE)
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        last_try = attempt == MAX_ATTEMPTS - 1
         try:
-            resp = requests.get(url, params=params, headers=headers, timeout=60)
+            resp = _quota_get(url, params, headers)
         except requests.exceptions.RequestException:
+            if last_try:
+                return None
             time.sleep(2)
             continue
         if resp.status_code == 200:
@@ -139,12 +206,14 @@ def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Optional[Any]:
                 return resp.json()
             except ValueError:
                 return None
+        if last_try:
+            return None
+        if resp.status_code == 429:
+            _QUOTA["remaining"] = 0     # 下一次呼叫前會依 reset_at 等待
+            continue
         if resp.status_code in (401, 403):
             _TOKEN_CACHE["token"] = None
             time.sleep(1)
-            continue
-        if resp.status_code == 429:
-            time.sleep(3 * (attempt + 1))
             continue
         return None
     return None
@@ -156,21 +225,31 @@ def get_city_vds(city: str) -> List[Dict[str, Any]]:
     cached = _STATIC_CACHE.get(city)
     if cached and now < cached["ts"] + STATIC_TTL_SEC:
         return cached["data"]
+    disk = _disk_load("vds", city, STATIC_TTL_SEC)
+    if disk:
+        _STATIC_CACHE[city] = {"ts": now, "data": disk}
+        return disk
     data = _get(f"/VD/City/{city}")
     vds = (data or {}).get("VDs", []) if isinstance(data, dict) else []
     if vds:
         _STATIC_CACHE[city] = {"ts": now, "data": vds}
+        _disk_save("vds", city, vds)
     return vds
 
 
 def get_city_vd_live(city: str, use_cache: bool = True) -> List[Dict[str, Any]]:
-    """即時 VD 車流（速度/流量），短快取。"""
+    """即時 VD 車流（速度/流量），短快取。
+
+    呼叫失敗時回傳空清單（畫面照實顯示無資料），但不寫入快取，下一次請求會立即重新抓取。
+    """
     now = time.time()
     cached = _LIVE_CACHE.get(city)
     if use_cache and cached and now < cached["ts"] + LIVE_TTL_SEC:
         return cached["data"]
     data = _get(f"/Live/VD/City/{city}")
-    vds = (data or {}).get("VDLives", []) if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        return []
+    vds = data.get("VDLives", []) or []
     _LIVE_CACHE[city] = {"ts": now, "data": vds}
     return vds
 
@@ -348,14 +427,20 @@ def get_congestion_levels(city: str) -> Dict[str, List[Dict[str, Any]]]:
     cached = _LEVEL_CACHE.get(city)
     if cached and now < cached["ts"] + CONGESTION_TTL_SEC:
         return cached["data"]
+    disk = _disk_load("levels", city, CONGESTION_TTL_SEC)
+    if disk is not None:
+        _LEVEL_CACHE[city] = {"ts": now, "data": disk}
+        return disk
     data = _get(f"/CongestionLevel/City/{city}")
+    if not isinstance(data, dict):
+        return {}  # 失敗不寫入快取（否則整個縣市會退回預設門檻長達 6 小時）
     out: Dict[str, List[Dict[str, Any]]] = {}
-    groups = data.get("CongestionLevels", []) if isinstance(data, dict) else []
-    for item in groups:
+    for item in data.get("CongestionLevels", []) or []:
         clid = item.get("CongestionLevelID")
         if clid:
             out[clid] = item.get("Levels") or []
     _LEVEL_CACHE[city] = {"ts": now, "data": out}
+    _disk_save("levels", city, out)
     return out
 
 
@@ -366,20 +451,36 @@ def get_city_sections(city: str, use_cache: bool = True) -> List[Dict[str, Any]]
     if use_cache and cached and now < cached["ts"] + LIVE_TTL_SEC:
         return cached["data"]
     data = _get(f"/Live/City/{city}")
-    secs = data.get("LiveTraffics", []) if isinstance(data, dict) else []
+    if not isinstance(data, dict):
+        return []  # 失敗不寫入快取
+    secs = data.get("LiveTraffics", []) or []
     _SECTION_CACHE[city] = {"ts": now, "data": secs}
     return secs
 
 
 def get_link_to_clid(city: str, force_live: bool = False) -> Dict[str, Any]:
-    """{LinkID: CongestionLevelID}（由即時路段建立，補足無法直接命中的 VD）。"""
+    """{LinkID: CongestionLevelID}：路段與壅塞門檻的對照（靜態，長快取並存硬碟；
+    force_live 不影響，強制更新即時車流時不重抓此對照）。"""
+    now = time.time()
+    cached = _LINKMAP_CACHE.get(city)
+    if cached and now < cached["ts"] + STATIC_TTL_SEC:
+        return cached["data"]
+    disk = _disk_load("linkmap", city, STATIC_TTL_SEC)
+    if disk is not None:
+        _LINKMAP_CACHE[city] = {"ts": now, "data": disk}
+        return disk
+    sections = get_city_sections(city, use_cache=True)
+    if not sections:
+        return {}  # 失敗不寫入快取
     mapping: Dict[str, Any] = {}
-    for section in get_city_sections(city, use_cache=not force_live):
+    for section in sections:
         clid = section.get("CongestionLevelID")
         for link in (section.get("LinkIDs") or []):
             lid = link.get("LinkID") if isinstance(link, dict) else link
             if lid:
                 mapping[lid] = clid
+    _LINKMAP_CACHE[city] = {"ts": now, "data": mapping}
+    _disk_save("linkmap", city, mapping)
     return mapping
 
 
