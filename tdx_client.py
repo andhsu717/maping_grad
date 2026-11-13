@@ -53,7 +53,7 @@ _CALL_LOCK = threading.Lock()   # 依序呼叫 TDX（多個請求同時進來時
 _QUOTA = {"remaining": None, "reset_at": 0.0}   # 由回應標頭得知的剩餘額度與重置時間
 
 STATIC_TTL_SEC = 24 * 3600       # 設備清單、路段對照（靜態）
-LIVE_TTL_SEC = 180               # TDX 偵測器資料每 5 分鐘更新一次，3 分鐘內重複查詢沿用快取
+LIVE_TTL_SEC = 60                # TDX 偵測器資料每分鐘更新一次（約晚 5 分鐘發布）；快取需短於前端輪詢間隔，輪詢才會拿到新一期
 CONGESTION_TTL_SEC = 24 * 3600   # 官方壅塞門檻（幾乎不變）
 MAX_QUOTA_WAIT_SEC = 65          # 額度用完時最多等待秒數（額度每分鐘重置）
 MAX_ATTEMPTS = 3

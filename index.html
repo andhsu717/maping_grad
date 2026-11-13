@@ -762,7 +762,7 @@
         // VD 車流顏色（與左欄箭頭色票一致）
         const VD_COLORS = { GREEN: '#16a34a', ORANGE: '#ea580c', RED: '#dc2626', GRAY: '#94a3b8' };
         const VD_WARN_COLOR = '#f59e0b';
-        const LIVE_POLL_MS = 10 * 60 * 1000; // 每 10 分鐘更新即時車流
+        const LIVE_POLL_MS = 2 * 60 * 1000; // 每 2 分鐘更新即時車流（後端快取 60 秒，每次輪詢都會拿到 TDX 新一期）
         // 官方壅塞等級 1(A)~5(E) 代表速度（無門檻時使用，km/h）
         const VD_LEVEL_FALLBACK_SPEED = { 1: 45, 2: 37, 3: 30, 4: 23, 5: 10 };
         const VD_LEVEL_LABEL = { 1: 'A 順暢', 2: 'B 車多', 3: 'C 壅塞', 4: 'D 嚴重壅塞', 5: 'E 極度壅塞' };
@@ -2552,7 +2552,7 @@
             runBtn.disabled = false; 
             clearBtn.disabled = false;
             progressWrap.style.display = 'none';
-            // 計算完成後重新抓取即時車流（走 60 秒快取，避免 TDX 風暴造成卡頓）
+            // 計算完成後重新抓取即時車流（計算時剛抓過，會走後端 60 秒快取，不額外呼叫 TDX）
             try {
                 await refreshLiveTraffic(false);
             } catch (e) {
@@ -2627,6 +2627,20 @@
             if (liveTrafficTimer) return;
             liveTrafficTimer = setInterval(refreshLiveTraffic, LIVE_POLL_MS);
         }
+        function stopLiveTrafficPolling() {
+            if (!liveTrafficTimer) return;
+            clearInterval(liveTrafficTimer);
+            liveTrafficTimer = null;
+        }
+        // 網頁切到背景時暫停輪詢以節省 TDX 額度；切回前景時立即更新一次並恢復輪詢
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopLiveTrafficPolling();
+            } else {
+                refreshLiveTraffic(false).catch(err => console.error('即時車流更新失敗:', err));
+                startLiveTrafficPolling();
+            }
+        });
 
         startLiveTrafficPolling();
     </script>
