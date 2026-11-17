@@ -422,6 +422,7 @@
         .node-count-badge { font-size: 10px; background: #e0f2fe; color: #0284c7; padding: 1px 6px; border-radius: 10px; font-weight: 600; border: 1px solid #bae6fd; flex-shrink: 0; }
         .tl-cancel-btn { margin-left: 6px; font-size: 12px; line-height: 1; width: 20px; height: 20px; border: 1px solid #fecaca; border-radius: 50%; background: #fef2f2; color: #dc2626; cursor: pointer; flex-shrink: 0; padding: 0; }
         .tl-cancel-btn:hover { background: #fee2e2; border-color: #dc2626; }
+        .tl-cancel-btn:disabled { opacity: 0.4; cursor: wait; }
 
         /* 箭頭樣式 (依需求：現階段以綠色為主) */
         .timeline-arrow-wrap {
@@ -530,6 +531,7 @@
         .cancelled-stop-name { color: #334155; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .restore-stop-btn { font-size: 10px; padding: 2px 6px; border: 1px solid #16a34a; border-radius: 4px; background: #16a34a; color: #ffffff; cursor: pointer; flex-shrink: 0; }
         .restore-stop-btn:hover { background: #15803d; }
+        .restore-stop-btn:disabled { background: #94a3b8; border-color: #94a3b8; cursor: wait; }
         .vd-toggle-panel #vd-scan-status { margin-top: 4px; font-size: 11px; color: #7c3aed; display: none; }
         .vd-toggle-panel #vd-scan-status.active { display: block; }
         .vd-sim-row { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
@@ -948,7 +950,7 @@
                 return;
             }
             if (t.classList && t.classList.contains('restore-stop-btn')) {
-                restoreStop(t.getAttribute('data-trip'), parseInt(t.getAttribute('data-sidx'), 10));
+                restoreCancelGroup(t.getAttribute('data-trip'), t.getAttribute('data-group'));
                 return;
             }
             const lvAttr = t.getAttribute('data-lv');
@@ -1350,7 +1352,8 @@
                 trip.appliedReroutes = {};
                 trip.replacedSegments = [];
                 trip.rerouteOptions = [];
-                (trip.stops || []).forEach(s => { s.status = 'ACTIVE'; });
+                (trip.stops || []).forEach(s => { s.status = 'ACTIVE'; delete s.cancel_group; delete s.cancel_label; });
+                cancelRerouteScan(trip);
             });
             renderSidebar();
             renderAllMapLayers();
@@ -1585,7 +1588,17 @@
 
         /* ========== 改道系統：掃描/繪製/套用/清除 ========== */
         const rerouteScanTimers = {};
+        const rerouteScanCtls = {};   // 每個車次進行中的改道查詢（新查詢或重算時中止舊的）
         let rerouteScanPending = 0;
+
+        // 中止某車次尚未送出（防抖中）與進行中的改道掃描
+        function cancelRerouteScan(trip) {
+            if (!trip) return;
+            clearTimeout(rerouteScanTimers[trip.trip_key]);
+            const ctl = rerouteScanCtls[trip.trip_key];
+            if (ctl) ctl.abort();
+            delete rerouteScanCtls[trip.trip_key];
+        }
 
         function updateRerouteScanStatus() {
             const el = document.getElementById('vd-scan-status');
@@ -1670,11 +1683,18 @@
                 duration_min: l.duration_min || 0,
                 base_duration_min: (l.base_duration_min != null) ? l.base_duration_min : l.duration_min
             }));
+            // 同一車次只保留最新一次查詢；記下送出時的路線，回來時路線已變（重算／套用改道）就丟棄結果
+            const prevCtl = rerouteScanCtls[trip.trip_key];
+            if (prevCtl) prevCtl.abort();
+            const scanCtl = new AbortController();
+            rerouteScanCtls[trip.trip_key] = scanCtl;
+            const scanPolyline = trip.route_result.polyline;
             rerouteScanPending++;
             updateRerouteScanStatus();
             try {
                 const resp = await fetch(`${API_BASE}/api/route/alternatives`, {
                     method: 'POST',
+                    signal: scanCtl.signal,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         polyline: trip.route_result.polyline,
@@ -1696,6 +1716,10 @@
                     return;
                 }
                 const data = await resp.json();
+                if (scanCtl.signal.aborted || !trip.route_result || trip.route_result.polyline !== scanPolyline) {
+                    console.log(`改道掃描結果已過期，丟棄 (${trip.trip_key})`);
+                    return;
+                }
                 trip.rerouteOptions = data.legs || [];
                 const withAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CAN_REROUTE' && x.alternatives && x.alternatives.length).length;
                 const noAlts = (trip.rerouteOptions || []).filter(x => x.state === 'CANNOT_REROUTE' || !x.alternatives || !x.alternatives.length).length;
@@ -1703,8 +1727,13 @@
                 renderAllMapLayers();
                 renderTimelineView();
             } catch (err) {
-                console.error('改道查詢失敗:', err);
+                if (err && err.name === 'AbortError') {
+                    console.log(`改道掃描已中止（已有較新的查詢） (${trip.trip_key})`);
+                } else {
+                    console.error('改道查詢失敗:', err);
+                }
             } finally {
+                if (rerouteScanCtls[trip.trip_key] === scanCtl) delete rerouteScanCtls[trip.trip_key];
                 rerouteScanPending = Math.max(0, rerouteScanPending - 1);
                 updateRerouteScanStatus();
             }
@@ -2219,7 +2248,7 @@
                                 <span class="node-title">${item.address || '無地址資料'}</span>
                                 <span style="display:flex; align-items:center; flex-shrink:0;">
                                     <span class="node-count-badge">${item.merged_count} 站</span>
-                                    <button type="button" class="tl-cancel-btn" data-trip="${trip.trip_key}" data-idx="${index}" title="取消此站（整列合併站一併取消）">×</button>
+                                    <button type="button" class="tl-cancel-btn" data-trip="${trip.trip_key}" data-idx="${index}" title="${trip._busy ? '計算中，請稍候' : '取消此站（整列合併站一併取消）'}"${trip._busy ? ' disabled' : ''}>×</button>
                                 </span>
                             </div>
                         </div>
@@ -2423,20 +2452,22 @@
             }
         }
 
+        // 取消／恢復站點後重算單一車次。
+        // 重算回應已含即時車流（後端計算時抓取），不再呼叫 refreshLiveTraffic，
+        // 以免每次重算都讓「所有車次」重新掃描改道；只掃描本車次。
         async function reoptimizeTrip(trip) {
             if (!trip || trip._busy) return;
             trip._busy = true;
+            cancelRerouteScan(trip);   // 舊路線的改道查詢已無意義
             updateCancelledToolbar();
+            renderTimelineView();      // 顯示「計算中」並停用取消按鈕
             try {
-                await optimizeSingleTrip(trip);
+                await optimizeSingleTrip(trip);   // 內含 applyVdEta 與本車次的改道掃描排程
             } finally {
                 trip._busy = false;
             }
-            try {
-                await refreshLiveTraffic(false);
-            } catch (e) {
-                console.error('刷新即時車流失敗:', e);
-            }
+            buildVdPointIndex();
+            if (trip.is_computed && trip.route_result) applyVdEta(trip);
             renderSidebar();
             renderAllMapLayers();
             updateTimelineTripOptions();
@@ -2454,8 +2485,15 @@
             const n = (trip.stops || []).filter(s => s.status === 'ACTIVE' && ids.has(s.stop_id)).length;
             if (n === 0) return;
             if (!confirm(`取消 ${item.address || item.stop_id}（${n} 個訂單）？將立即重算路徑。`)) return;
+            // 同一合併站的訂單記為同一取消群組，恢復時一次恢復整組（只重算一次）
+            const group = `${tripKey}#${seqIdx}#${Date.now()}`;
+            const label = item.address || item.stop_id;
             (trip.stops || []).forEach(s => {
-                if (s.status === 'ACTIVE' && ids.has(s.stop_id)) s.status = 'CANCELLED';
+                if (s.status === 'ACTIVE' && ids.has(s.stop_id)) {
+                    s.status = 'CANCELLED';
+                    s.cancel_group = group;
+                    s.cancel_label = label;
+                }
             });
             reoptimizeTrip(trip);
         }
@@ -2470,29 +2508,48 @@
             return out;
         }
 
+        // 已取消站點依取消群組（合併站）彙整：一列 = 一次取消的合併站
+        function collectCancelledGroups() {
+            const groups = [];
+            const byKey = {};
+            collectCancelledStops().forEach(({ trip, stop }) => {
+                const gid = stop.cancel_group || `${trip.trip_key}#${stop.stop_id}`;
+                if (!byKey[gid]) {
+                    byKey[gid] = { gid, trip, label: stop.cancel_label || stop.name || stop.stop_id, stops: [] };
+                    groups.push(byKey[gid]);
+                }
+                byKey[gid].stops.push(stop);
+            });
+            return groups;
+        }
+
         function renderCancelledList() {
             const list = document.getElementById('cancelled-stop-list');
             if (!list) return;
-            const items = collectCancelledStops();
-            if (items.length === 0) {
+            const groups = collectCancelledGroups();
+            if (groups.length === 0) {
                 list.style.display = 'none';
                 list.innerHTML = '';
                 return;
             }
-            list.innerHTML = items.map(({ trip, stop, sidx }) => `
+            list.innerHTML = groups.map(({ gid, trip, label, stops }) => {
+                const names = stops.map(s => s.name || s.stop_id).join('、').replace(/"/g, '&quot;');
+                const busy = !!trip._busy;
+                return `
                 <div class="cancelled-stop-row">
-                    <div class="cancelled-stop-info">
+                    <div class="cancelled-stop-info" title="${names}">
                         <span class="cancelled-stop-trip">[${trip.date}] ${trip.order_id}</span>
-                        <span class="cancelled-stop-name">${stop.name || stop.stop_id}</span>
+                        <span class="cancelled-stop-name">${label}（${stops.length} 筆訂單）</span>
                     </div>
-                    <button type="button" class="restore-stop-btn" data-trip="${trip.trip_key}" data-sidx="${sidx}">恢復</button>
-                </div>`).join('');
+                    <button type="button" class="restore-stop-btn" data-trip="${trip.trip_key}" data-group="${gid}"${busy ? ' disabled' : ''}>${busy ? '計算中' : '恢復'}</button>
+                </div>`;
+            }).join('');
         }
 
         function updateCancelledToolbar() {
             const btn = document.getElementById('vd-restore-btn');
             if (!btn) return;
-            const items = collectCancelledStops();
+            const items = collectCancelledGroups();
             const badge = document.getElementById('vd-restore-count');
             if (badge) badge.textContent = items.length;
             const list = document.getElementById('cancelled-stop-list');
@@ -2513,13 +2570,21 @@
             }
         }
 
-        function restoreStop(tripKey, sidx) {
+        // 一次恢復整個取消群組（合併站的所有訂單），只重算一次
+        function restoreCancelGroup(tripKey, gid) {
             const trip = tripStore[tripKey];
             if (!trip || trip._busy) return;
-            const stop = (trip.stops || [])[sidx];
-            if (!stop || stop.status !== 'CANCELLED') return;
-            stop.status = 'ACTIVE';
-            reoptimizeTrip(trip);
+            let n = 0;
+            (trip.stops || []).forEach(s => {
+                if (s.status !== 'CANCELLED') return;
+                const sg = s.cancel_group || `${trip.trip_key}#${s.stop_id}`;
+                if (sg !== gid) return;
+                s.status = 'ACTIVE';
+                delete s.cancel_group;
+                delete s.cancel_label;
+                n++;
+            });
+            if (n > 0) reoptimizeTrip(trip);
         }
 
         async function runQueueOptimization() {
